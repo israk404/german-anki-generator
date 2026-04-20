@@ -1,0 +1,27 @@
+<div class="card-front">
+
+  <div class="type-badge {{word_type}}">{{word_type}}</div>
+
+  {{#article}}<div class="article {{article}}">{{article}}</div>{{/article}}
+
+  <div class="target-word">{{target_word}}</div>
+
+  {{#plural}}
+  <div class="meta-row">Plural: <span>{{plural}}</span></div>
+  {{/plural}}
+
+  {{#conjugation}}
+  <div class="conjugation-box">{{conjugation}}</div>
+  {{/conjugation}}
+
+  {{#comparative}}
+  <div class="meta-row">{{comparative}} &middot; {{superlative}}</div>
+  {{/comparative}}
+
+  {{#register}}
+  <div class="register-badge">{{register}}</div>
+  {{/register}}
+
+  <div class="audio-btn">{{audio_word}}</div>
+
+</div>

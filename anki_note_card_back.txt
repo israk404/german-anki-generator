@@ -1,0 +1,56 @@
+{{FrontSide}}
+<hr class="divider">
+<div class="card-back">
+
+  <div class="translation">{{english_translation}}</div>
+
+  <div class="pronunciation-box">&#x1F5E3; {{pronunciation}}</div>
+
+  {{#genitive}}
+  <div class="detail-row"><span class="lbl">Genitive</span>{{genitive}}</div>
+  {{/genitive}}
+
+  {{#auxiliary}}
+  <div class="detail-row"><span class="lbl">Perfect</span>{{auxiliary}} + {{past_participle}}</div>
+  {{/auxiliary}}
+
+  {{#separable}}
+  <div class="detail-row"><span class="lbl">Separable</span>{{separable}}</div>
+  {{/separable}}
+
+  {{#reflexive}}
+  <div class="detail-row"><span class="lbl">Reflexive</span>{{reflexive}}</div>
+  {{/reflexive}}
+
+  {{#antonym}}
+  <div class="detail-row"><span class="lbl">Opposite</span>{{antonym}}</div>
+  {{/antonym}}
+
+  <div class="sentence-box">
+    <div class="de-sent">{{german_sentence}} {{audio_sentence}}</div>
+    <div class="en-sent">{{english_sentence}}</div>
+  </div>
+
+  {{#cloze_sentence}}
+  <div class="cloze-box">&#x270F;&#xFE0F; {{cloze_sentence}}</div>
+  {{/cloze_sentence}}
+
+  {{#collocations}}
+  <div class="section-block">
+    <div class="sec-label">Common phrases</div>
+    <div class="sec-body">{{collocations}}</div>
+  </div>
+  {{/collocations}}
+
+  {{#word_family}}
+  <div class="section-block">
+    <div class="sec-label">Word family</div>
+    <div class="sec-body">{{word_family}}</div>
+  </div>
+  {{/word_family}}
+
+  {{#notes}}
+  <div class="notes-box">&#x1F4A1; {{notes}}</div>
+  {{/notes}}
+
+</div>
