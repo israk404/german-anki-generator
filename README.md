@@ -7,13 +7,8 @@ A desktop app that turns a list of German words into a complete, import-ready An
 ## Screenshots
 
 <p align="center">
-  <img src="screenshots/app_main.png" width="32%">
-  <img src="screenshots/app_preview.png" width="32%">
-  <img src="screenshots/app_prompt.png" width="32%">
-</p>
-<p align="center">
-  <img src="screenshots/anki_card_front.png" width="32%">
-  <img src="screenshots/anki_card_back.png" width="32%">
+  <img src="screenshots/anki_front_view.jpeg" width="48%">
+  <img src="screenshots/anki_back_view.jpeg" width="48%">
 </p>
 
 ---
