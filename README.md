@@ -1,327 +1,502 @@
-# 🇩🇪 German Anki Card Generator
+# German Anki Generator
 
-A desktop app that turns a list of German words into a complete, import-ready Anki deck — with audio, example sentences, cloze exercises, collocations, word families, and pronunciation guides. Works with **any native language** — not just Bengali.
+Generate high-quality Anki flashcards for German vocabulary using Google Gemini, Groq, or any OpenAI-compatible LLM. Produces three card types per word, generates native audio via edge-tts, fetches images from Pixabay, and validates every card with an optional verification pass.
+
+![Python](https://img.shields.io/badge/python-3.10%2B-blue)
+![License](https://img.shields.io/badge/license-MIT-green)
 
 ---
 
-## Screenshots
+## Table of contents
 
-<p align="center">
-  <img src="screenshots/anki_front_view.jpeg" width="48%">
-  <img src="screenshots/anki_back_view.jpeg" width="48%">
-</p>
+- [What it does](#what-it-does)
+- [Features](#features)
+- [Requirements](#requirements)
+- [Installation](#installation)
+- [Getting API keys](#getting-api-keys)
+- [First run](#first-run)
+- [Workflow](#workflow)
+- [Anki setup](#anki-setup)
+- [Card types explained](#card-types-explained)
+- [Configuration reference](#configuration-reference)
+- [Troubleshooting](#troubleshooting)
+- [FAQ](#faq)
+- [License](#license)
 
 ---
 
 ## What it does
 
-You give it a list of German words — any mix of nouns, verbs, adjectives, and phrases.
-It generates:
+Give it a list of German words. It returns a fully-prepared Anki deck: 31 fields per word, 3 card types, native pronunciation audio, example sentences with translations, images for nouns, and grammar metadata (gender, plural, conjugations, valency). All you do is import one `.txt` file into Anki.
 
-- A ready-to-import `.txt` file for Anki
-- German audio for every word (with article for nouns)
-- German audio for every example sentence
-- All 26 card fields filled automatically by AI
+**Input:**
+```
+Haus, gehen, groß, Guten Morgen
+```
 
-The AI automatically identifies each word type and fills the right fields — conjugation for verbs, plural and genitive for nouns, comparative and antonym for adjectives, and register for phrases.
+**Output:**
+- `anki_output/<timestamp>_Haus_gehen_gross.txt` — import this into Anki
+- `anki_output/media/*.mp3` — copy these to Anki's `collection.media/` folder
+- `anki_output/backups/*.json` — raw data, editable and re-exportable
 
 ---
 
-## Download
+## Features
 
-### ✅ Option 1 — Windows app (no Python needed)
+- **3 card types from one note** — Recognition (DE→EN), Production (EN→DE, typed), Gender Drill (der/die/das)
+- **31 structured fields** — grammar, pronunciation, collocations, mnemonics, and more
+- **AI generation** — Gemini 3.6 Flash / 3.5 Flash-Lite, Groq (GPT-OSS-120B), or any OpenAI-compatible endpoint (OpenAI, DeepSeek, OpenRouter, Ollama, etc.)
+- **Optional verification pass** — a second LLM call checks the first one's work with a strict fact-only correction list
+- **Native audio** — Microsoft edge-tts, 3 verified German voices
+- **Unique audio filenames** — sentence MP3s are hashed so the same word in two decks never collides
+- **Pixabay images** — auto-fetched for concrete nouns
+- **Multi-key rotation** — add multiple API keys per provider; the app round-robins through them
+- **Retry with exponential backoff** — survives rate limits and transient failures
+- **Session resume** — close the app, come back, pick up where you left off
+- **Modern GUI** — light and dark mode, editable fields, checkbox word picker
+- **No cloud dependency for state** — everything saves to local JSON files
 
-👉 **[Download latest release](https://github.com/israk404/german-anki-generator/releases/latest)**
+---
 
-Download `GermanAnkiGenerator.exe` and run it. No installation needed.
+## Requirements
 
-> **Windows security warning:** Click **More info → Run anyway** when Windows shows a security prompt. This is normal for open-source software without a paid certificate. The full source code is in this repository for anyone to verify.
+- **Python 3.10 or newer**
+- **Windows, macOS, or Linux**
+- **Internet connection** (for AI APIs, edge-tts, and Pixabay)
+- **Anki** (desktop) — free download at [apps.ankiweb.net](https://apps.ankiweb.net)
 
-### Option 2 — Run from Python source
+---
 
-Requires Python 3.9 or higher and an internet connection.
+## Installation
+
+### 1. Clone the repository
 
 ```bash
 git clone https://github.com/israk404/german-anki-generator.git
 cd german-anki-generator
-pip install gtts pyperclip
+```
+
+### 2. (Recommended) Create a virtual environment
+
+```bash
+# Windows
+python -m venv venv
+venv\Scripts\activate
+
+# macOS / Linux
+python3 -m venv venv
+source venv/bin/activate
+```
+
+### 3. Install dependencies
+
+```bash
+pip install google-genai groq edge-tts pyperclip pillow
+```
+
+| Package | Purpose | Required? |
+|---|---|---|
+| `google-genai` | Gemini API client | Yes (for Gemini) |
+| `groq` | Groq API client | Yes (for Groq) |
+| `edge-tts` | Microsoft neural voices for German audio | Yes |
+| `pyperclip` | Clipboard paste support | Optional but recommended |
+| `pillow` | Image thumbnails in the preview tab | Optional |
+
+The app runs even if some optional packages are missing — you just lose the related features. The startup log tells you what loaded and what didn't.
+
+### 4. Verify the install
+
+```bash
+python -m py_compile german_anki_generator.py
+```
+
+Silent exit = good. Then launch:
+
+```bash
 python german_anki_generator.py
 ```
 
-Or click the green **Code** button → **Download ZIP** → extract → run `german_anki_generator.py`.
+---
 
-On Linux, install tkinter first:
-```bash
-sudo apt install python3-tk
+## Getting API keys
+
+You need at least **one** provider configured. Gemini is the recommended default — it has a generous free tier and excellent German.
+
+### Gemini (recommended, free tier available)
+
+1. Go to [aistudio.google.com/apikey](https://aistudio.google.com/apikey)
+2. Sign in with a Google account
+3. Click **Create API key**
+4. Copy the key
+
+**Free tier limits for `gemini-3.6-flash`:**
+- 5 requests per minute (RPM)
+- 20 requests per day (RPD)
+- Resets at midnight Pacific Time (1:00 PM Bangladesh Time)
+
+> Because each word consumes **2 requests** (1 generation + 1 verification), 20 RPD = **10 words per day** per project. For a 500-word batch, either use multiple projects or enable billing.
+
+**Recommended alternative:** `gemini-3.5-flash-lite` has a **500 RPD** free tier — 25× more. Perfect for verification. Use 3.6 Flash for generation and 3.5 Flash-Lite for verification.
+
+### Groq (fast, free tier)
+
+1. Go to [console.groq.com/keys](https://console.groq.com/keys)
+2. Sign up or log in
+3. Create an API key
+4. Copy it
+
+Groq's free tier offers **1,000 RPD** for `openai/gpt-oss-120b` — excellent for bulk generation.
+
+### Custom (OpenAI-compatible)
+
+Any endpoint that speaks `/v1/chat/completions` works:
+
+- **OpenAI** — `https://api.openai.com`
+- **DeepSeek** — `https://api.deepseek.com`
+- **OpenRouter** — `https://openrouter.ai/api`
+- **Together AI** — `https://api.together.xyz`
+- **Mistral** — `https://api.mistral.ai`
+- **Ollama** (local) — `http://localhost:11434`
+
+You only need a base URL and a model name — the app handles the rest.
+
+### Pixabay (optional, for noun images)
+
+1. Go to [pixabay.com/api/docs](https://pixabay.com/api/docs/)
+2. Sign in and copy your free API key
+3. Paste it into **Settings → Export → Pixabay images**
+
+---
+
+## First run
+
+When you launch the app for the first time:
+
+1. **Settings tab → API keys** — paste your key(s) for the provider(s) you'll use
+2. **Settings tab → Generator** — pick your provider (Gemini is a good default)
+3. **Settings tab → Verifier** — check "Enable verification pass" and pick a model
+   - **Do not** use a weaker verifier than your generator — it can damage good content
+   - Recommended pairing: 3.6 Flash generates, 3.5 Flash-Lite verifies
+4. **Settings tab → Audio** — pick a voice (Conrad, Katja, or Amala all work)
+5. **Settings tab → Export** — set your deck name and note type name
+
+---
+
+## Workflow
+
+### Step 1 — Enter words
+
+Go to the **Input** tab. Paste or type German words:
+
+```
+Haus, gehen, groß, Guten Morgen, die Katze
 ```
 
----
+Commas, newlines, or a mix — all work.
 
-## How it works
+### Step 2 — Process
 
-```
-1. Open the app
-2. Select your native language from the sidebar dropdown
-3. Go to the "Master Prompt" tab → click "Copy master prompt"
-4. Paste into ChatGPT / Claude / Gemini
-5. Replace [INSERT YOUR WORDS HERE] with your word list
-6. Copy the JSON response → paste into the "JSON Input" tab
-7. Click "Preview cards" to verify
-8. Click "Generate Files + Audio"
-9. Copy the mp3 files to Anki's media folder
-10. Import the .txt file into Anki
-```
+Click **Process words**. The app:
+1. Calls your generator model once per word
+2. Optionally calls the verifier
+3. Fetches a Pixabay image if the word is a noun and images are enabled
+4. Saves everything to the session draft
 
-Mixed word types in one list are fine — the AI sorts them automatically.
-**Recommended batch size:** 10–20 words per request.
+Watch the live log for progress and any corrections the verifier makes.
 
----
+### Step 3 — Review and edit
 
-## Native language support
+Go to the **Preview** tab:
+- The **word picker button** opens a checkbox popup — tick or untick words you want to include
+- **Double-click any cell** in the field table to edit it inline
+- Use the **Filter** dropdown to see only nouns, verbs, adjectives, or phrases
+- Click **♪ Word** or **♪ Sentence** to preview audio
 
-The pronunciation field shows how a German word sounds in your native language script, not just English phonetics. Select your language once from the sidebar — the prompt updates automatically every time you copy it.
+### Step 4 — Generate files
 
-**Supported languages:**
-Bangla · Hindi · Arabic · Turkish · Spanish · Portuguese · French · Italian · Russian · Urdu · Persian (Farsi) · Chinese (Pinyin) · Japanese (Hiragana) · Korean · Vietnamese · Indonesian · Swahili · Polish · Dutch · Greek
+Click **Generate files + audio** in the bottom bar. This:
+1. Creates `.mp3` files for every word and sentence
+2. Writes the `.txt` file for Anki import
+3. Writes a JSON backup of the session
 
-Example pronunciation field for the word **Haus**:
+Output goes to `anki_output/`.
 
-| Language | Pronunciation field |
-|---|---|
-| Bangla | হাউস \| hous \| sounds like English house |
-| Hindi | हाउस \| hous \| sounds like English house |
-| Arabic | هاوس \| hous \| sounds like English house |
-| Spanish | jaus \| hous \| sounds like English house |
-| Japanese | ハウス \| hous \| sounds like English house |
+### Step 5 — Import into Anki
+
+See [Anki setup](#anki-setup) below.
 
 ---
 
-## Card fields (26 universal fields)
+## Anki setup
 
-| # | Field | What it contains |
-|---|---|---|
-| 1 | word_type | noun · verb · adjective · phrase |
-| 2 | target_word | The German word |
-| 3 | article | der · die · das (nouns only) |
-| 4 | plural | Full plural with article |
-| 5 | genitive | Genitive singular form |
-| 6 | auxiliary | haben or sein (verbs only) |
-| 7 | past_participle | e.g. gegangen |
-| 8 | conjugation | ich · du · er/sie/es · wir forms |
-| 9 | separable | yes or no (verbs only) |
-| 10 | reflexive | yes or no (verbs only) |
-| 11 | comparative | e.g. größer (adjectives only) |
-| 12 | superlative | e.g. am größten |
-| 13 | antonym | Opposite word |
-| 14 | register | formal · informal · neutral (phrases) |
-| 15 | english_translation | English meaning |
-| 16 | pronunciation | Native language · English phonetic · memory tip |
-| 17 | german_sentence | A1/A2 example sentence |
-| 18 | english_sentence | Translation of the sentence |
-| 19 | cloze_sentence | Fill-in-the-blank version |
-| 20 | collocations | Common fixed phrases |
-| 21 | word_family | Related words from the same root |
-| 22 | image_url | Optional image (leave blank) |
-| 23 | audio_word | Auto-generated mp3 tag |
-| 24 | audio_sentence | Auto-generated mp3 tag |
-| 25 | notes | Memory trick or grammar warning |
-| 26 | tags | Level + type + topic e.g. A1 noun home |
+### 1. Create the note type
 
----
+Open Anki → **Tools → Manage Note Types** → **Add** → **Clone: Basic** → name it `GermanAnki_v8` (or whatever you set in Settings).
 
-## Anki setup (one-time)
-
-Do this once. All future imports work automatically after.
-
-### Step 1 — Create the note type
-
-In Anki: **Tools → Manage Note Types → Add → Clone: Basic → OK**
-
-Name it exactly: `German Universal`
-
-### Step 2 — Add all 26 fields
-
-Click **Fields**. Delete the default fields. Add these in **exactly this order**:
+Click **Fields…** and add these **31 fields in this exact order**:
 
 ```
 1.  word_type
 2.  target_word
-3.  article
-4.  plural
-5.  genitive
-6.  auxiliary
-7.  past_participle
-8.  conjugation
-9.  separable
-10. reflexive
-11. comparative
-12. superlative
-13. antonym
-14. register
-15. english_translation
-16. pronunciation
-17. german_sentence
-18. english_sentence
-19. cloze_sentence
-20. collocations
-21. word_family
-22. image_url
-23. audio_word
-24. audio_sentence
-25. notes
-26. tags
+3.  full_answer
+4.  english_translation
+5.  sense_hint
+6.  german_sentence
+7.  english_sentence
+8.  article
+9.  plural
+10. genitive
+11. plural_only
+12. present_3sg
+13. preterite
+14. past_participle
+15. auxiliary
+16. separable
+17. reflexive
+18. valency
+19. comparative
+20. superlative
+21. pronunciation_ipa
+22. pronunciation_native
+23. memory_tip
+24. confusable
+25. collocations
+26. word_family
+27. register
+28. image_url
+29. notes
+30. audio_word
+31. audio_sentence
 ```
 
-### Step 3 — Add the card template
+Delete the default `Front` and `Back` fields. Save.
 
-Click **Cards** on the note type.
+### 2. Install the card templates
 
-- Copy the contents of `anki_note_card_front.txt` → paste into **Front Template**
-- Copy the contents of `anki_note_card_back.txt` → paste into **Back Template**
-- Copy the contents of `anki_note_card_styling.css` → paste into **Styling**
+This repo ships with three card templates and a CSS file in the `templates/` folder (if using them):
 
-Click **Close** → **Save**.
+- `1-recognition-front.html` / `1-recognition-back.html`
+- `2-production-front.html` / `2-production-back.html`
+- `3-gender-drill-front.html` / `3-gender-drill-back.html`
+- `styling.css`
 
-### Step 4 — Import your generated file
+To install:
 
-1. Copy all `.mp3` files from `anki_output/media/` to your Anki media folder:
-   - **Windows:** `%APPDATA%\Anki2\User 1\collection.media`
-   - **macOS:** `~/Library/Application Support/Anki2/User 1/collection.media`
-   - **Linux:** `~/.local/share/Anki2/User 1/collection.media`
+1. In **Manage Note Types**, select `GermanAnki_v8`, click **Cards…**
+2. Rename **Card 1** to `Recognition` → paste the two recognition `.html` files
+3. Add a new card type via **Options → Add Card Type** → rename to `Production` → paste the two production files
+4. Add another → rename to `Gender Drill` → paste the two gender drill files
+5. Click the **Styling** tab → paste `styling.css`
+6. Click **Save**
 
-2. In Anki: **File → Import → select the `.txt` file**
-3. Set **Note Type** to `German Universal`
-4. Tick ✅ **Allow HTML in fields**
-5. Confirm fields are mapped in order (field 1 → field 26)
-6. Click **Import**
+### 3. Set card generation rules
+
+This step is **required** — without it, Gender Drill cards will be generated for verbs and adjectives (and appear blank).
+
+- **Recognition** → generation rule: leave empty
+- **Production** → generation rule: leave empty
+- **Gender Drill** → generation rule: `article`
+
+### 4. Copy the audio files
+
+Copy every `.mp3` from `anki_output/media/` to Anki's media folder:
+
+**Windows:**
+```
+C:\Users\<you>\AppData\Roaming\Anki2\<profile>\collection.media\
+```
+
+**macOS:**
+```
+~/Library/Application Support/Anki2/<profile>/collection.media/
+```
+
+**Linux:**
+```
+~/.local/share/Anki2/<profile>/collection.media/
+```
+
+You can open the media folder quickly with **Tools → Check Media → Open media folder**.
+
+### 5. Import the .txt
+
+In Anki:
+
+1. **File → Import**
+2. Select your `<timestamp>_xxx.txt` file
+3. Set **Note Type** to `GermanAnki_v8`
+4. Set **Deck** to the deck you want
+5. Set **Fields separated by**: **Tab**
+6. Set **Allow HTML in fields**: **On**
+7. Click **Import**
+
+Verify the field mapping matches — the `.txt` header row declares the columns in order, so Anki should map them automatically.
 
 ---
 
-## App features
+## Card types explained
 
-### Sidebar
+### 1. Recognition (DE→EN)
 
-| Option | What it does |
-|---|---|
-| Native Language | Sets the script/phonetics used in the pronunciation field |
-| Generate reverse cards | Adds an English → German card for every German → English card |
-| Sentence audio | Generates a second mp3 for the example sentence |
-| Deck name | Which Anki deck to import into. Use `::` for subdecks e.g. `German::A1` |
+- **Front:** the German word + audio
+- **Back:** article, translation, example sentence, pronunciation, grammar, collocations
+- **Purpose:** do you know what this word means?
 
-### Tabs
+### 2. Production (EN→DE)
 
-| Tab | Purpose |
-|---|---|
-| JSON Input | Paste, load, or clear the AI's JSON response |
-| Preview | Inspect each card — shows type badge and gender color |
-| Master Prompt | View and copy the prompt for any AI |
+- **Front:** English translation + typed-answer input
+- **Back:** the full German answer (article + word for nouns)
+- **Purpose:** can you produce the German word on demand? Wrong article = wrong answer.
 
-### Gender color coding
+### 3. Gender Drill (nouns only)
 
-| Color | Article | Gender |
+- **Front:** bare noun — "Der, die, oder das?"
+- **Back:** the correct article + plural
+- **Purpose:** drill the article as a reflex
+- **Note:** only generated for singular-capable nouns (excludes *die Leute*, *die Ferien*)
+
+---
+
+## Configuration reference
+
+All settings live in `anki_config.json` in the app folder. You can edit it by hand or via the GUI.
+
+| Setting | Default | Notes |
 |---|---|---|
-| 🔵 Blue | der | masculine |
-| 🔴 Red | die | feminine |
-| 🟢 Green | das | neuter |
-
-### Output folder structure
-
-```
-anki_output/
-├── media/
-│   ├── das_haus.mp3           ← word audio
-│   ├── sent_das_haus.mp3      ← sentence audio
-│   └── ...
-├── backups/
-│   └── 20250118_....json      ← original JSON saved automatically
-└── 20250118_haus_gehen.txt    ← Anki import file
-```
-
----
-
-## Files in this repository
-
-| File | What it is |
-|---|---|
-| `german_anki_generator.py` | Main application — run with Python |
-| `anki_note_card_front.txt` | Front template — paste into Anki card editor |
-| `anki_note_card_back.txt` | Back template — paste into Anki card editor |
-| `anki_note_card_styling.css` | Card CSS — paste into Anki card editor |
-| `README.md` | This file |
-| `LICENSE` | MIT license |
+| `provider` | `Gemini` | Which AI provider to use |
+| `gemini_model` | `gemini-3.6-flash` | Model ID |
+| `groq_model` | `openai/gpt-oss-120b` | Model ID |
+| `verifier_enabled` | `False` | Run a second LLM pass to check facts |
+| `verifier_gemini_model` | `gemini-3.6-flash` | Use a model **at least as strong** as the generator |
+| `voice_word` | `de-DE-ConradNeural` | Word audio voice |
+| `voice_sentence` | `de-DE-KatjaNeural` | Sentence audio voice |
+| `audio_speed` | `+0%` | Range −50% to +20% |
+| `sentence_audio` | `True` | Generate sentence MP3s |
+| `overnight_mode` | `False` | Enable per-word retries on failure |
+| `max_retries` | `5` | Attempts per word per stage |
+| `backoff_base` | `10.0` | Exponential backoff base (seconds) |
+| `max_overnight_passes` | `1` | Batch retry passes for failed words |
+| `pixabay_key` | `""` | Pixabay API key |
+| `use_pixabay` | `True` | Fetch images for nouns |
+| `native_language` | `Bangla` | Language for `pronunciation_native` field |
+| `deck_name` | `German::Vocabulary` | Deck name in the exported `.txt` |
+| `notetype_name` | `GermanAnki_v8` | Note type name in the exported `.txt` |
 
 ---
 
-## Frequently asked questions
+## Troubleshooting
 
-**Q: Do I need an API key?**
-No. You copy the prompt manually and paste it into any free AI chat. No account or key required.
+### "No module named 'google.genai'" (or similar)
 
-**Q: My language is not in the list. Can I still use it?**
-Yes. Select any language from the list as a fallback, then manually edit the pronunciation field in the JSON before generating. The format is always: `your phonetic | English phonetic | memory tip`.
+Install the missing package:
 
-**Q: What if the AI gives me extra text around the JSON?**
-The app automatically strips markdown code fences and finds the JSON array inside any response.
-
-**Q: Can I use this without internet?**
-The `.txt` file always generates. You only need internet for audio generation (gTTS uses Google's servers).
-
-**Q: The audio sounds robotic. Can I use better TTS?**
-gTTS is free but basic. You can record words yourself or use a service like ElevenLabs and rename the files to match the pattern the app uses.
-
-**Q: My import says "field count mismatch".**
-Your note type doesn't have exactly 26 fields in the right order. Go to **Tools → Manage Note Types → German Universal → Fields** and verify against the list above.
-
-**Q: The exe won't open.**
-Click **More info → Run anyway** on the Windows security prompt. If it still fails, run from Python source instead.
-
-**Q: Can I study cloze cards separately?**
-The `cloze_sentence` field shows a fill-in-the-blank prompt on the back of each card. This is a Basic note type — for true interactive cloze testing you would need a separate Cloze note type in Anki.
-
----
-
-## Troubleshooting (Python version)
-
-**App won't open**
 ```bash
-python --version        # must be 3.9 or higher
-pip install gtts pyperclip
+pip install google-genai groq edge-tts pyperclip pillow
+```
+
+The startup log shows which dependencies loaded successfully.
+
+### "429 RESOURCE_EXHAUSTED" errors
+
+You've hit your daily quota. Check which provider/model you're using:
+
+- **Gemini 3.6 Flash free tier:** 20 RPD — resets at midnight Pacific (1:00 PM Bangladesh Time)
+- **Gemini 3.5 Flash-Lite free tier:** 500 RPD
+- **Groq GPT-OSS-120B free tier:** 1,000 RPD
+
+Options:
+- Wait for the daily reset
+- Switch to a higher-quota model (Flash-Lite, Groq)
+- Add more API keys (each from a separate Google Cloud project — keys from the same project share quota)
+
+### "Event loop is closed" errors after generating audio
+
+Fixed in v9. If you see it, you're on an older version — upgrade.
+
+### Audio doesn't play in Anki
+
+1. Confirm the `.mp3` files are in Anki's `collection.media/` folder — not just in `anki_output/media/`
+2. Run **Tools → Check Media** in Anki to reindex
+3. Re-import the `.txt` file — the `[sound:...]` tags need to be present
+
+### Wrong image for a word
+
+Pixabay returns the most popular image for the English translation, which is often the wrong sense for polysemous words (*Bank*, *Maus*, *Ball*, *Schloss*). Double-click the `image_url` field in the Preview tab and paste your own URL, or clear it.
+
+### Verifier deletes or corrupts fields
+
+You're using a weaker verifier than your generator. Use the same model or a stronger one. v9 also has code-side guards that reject empty overwrites and protect sensitive fields — but the rule is: **the verifier should never be weaker than the generator**.
+
+### Voice audio sounds wrong or fails
+
+Only three edge-tts voices work reliably: Conrad, Katja, Amala. v9 restricts the dropdown to these. If you see failures, upgrade:
+
+```bash
+pip install -U edge-tts
+```
+
+### Same word in two decks plays the wrong sentence
+
+Fixed in v9. Sentence MP3 filenames now include a hash of the sentence text, so two different sentences for the same word never share a file.
+
+### Duplicate-word warning on process
+
+The app tracks every word you've ever processed in `anki_word_history.txt`. If you re-add a word intentionally, click **Yes** to continue. To clear history, delete the file.
+
+### App doesn't start, no window appears
+
+Run from a terminal to see errors:
+
+```bash
 python german_anki_generator.py
 ```
 
-**"No module named gtts" or "No module named pyperclip"**
-```bash
-pip install gtts pyperclip
-```
+Paste any traceback into a GitHub issue.
 
-**Audio not playing in Anki**
-- Copy `.mp3` files to the media folder *before* importing the `.txt`
-- In Anki: **Tools → Check Media** to verify files are detected
+---
 
-**JSON parse error**
-- The app strips code fences automatically — but if errors persist, delete everything before `[` and after `]` in the JSON box manually
+## FAQ
+
+**How many words can I process at once?**
+Technically unlimited. Practically, the daily API quota is the bottleneck. With free-tier Gemini 3.6 Flash, that's ~10 words/day per project. With Groq free tier, ~500–1,000 words/day.
+
+**Does it work offline?**
+No — generation requires an LLM API. Once cards are generated, you can edit them offline and export without internet, but audio generation requires internet (edge-tts).
+
+**Can I use it for other languages?**
+The prompts and card templates are German-specific. The infrastructure would work for any language with modified prompts.
+
+**Can I edit the prompts?**
+Yes — the **Prompts** tab shows both the generation and verification prompt. To modify them, edit `MASTER_PROMPT` and `VERIFIER_PROMPT` in the source file (around line 200).
+
+**How do I add new fields?**
+Add the field name to `UNIVERSAL_FIELDS` in the code, add it to the Anki note type, and update the card templates. Not trivial — plan the schema carefully.
+
+**Does it support AnkiConnect?**
+No — v9 removed AnkiConnect support. The file-import workflow is more reliable and doesn't require Anki to be running.
+
+**Is my API key safe?**
+Yes — keys are stored in `anki_config.json` locally and never transmitted anywhere except to the API provider you configured. Do not commit `anki_config.json` to GitHub.
+
+**Where are my session files?**
+- `anki_session_draft.json` — current session, auto-saved after each word
+- `anki_word_history.txt` — lifetime word history, used for duplicate detection
+- `anki_output/backups/*.json` — one backup per file generation
+
+All are plain text and human-readable.
 
 ---
 
 ## Contributing
 
-This tool is shared freely. Pull requests are welcome. Possible improvements:
-
-- More native languages in the pronunciation dropdown
-- Direct AI API integration (skip the copy-paste step)
-- Image search integration for the `image_url` field
-- Support for other target languages beyond German
-
----
+Issues and pull requests welcome. For significant changes, open an issue first to discuss the approach.
 
 ## License
 
-MIT — free to use, modify, and share. See `LICENSE` for details.
+MIT — see `LICENSE` file for details.
 
----
+## Acknowledgments
 
-## Acknowledgements
-
-Card design informed by the German learning community on Reddit (r/German) — particularly community discussions on effective Anki usage, what fields matter for long-term retention, and common beginner mistakes at A1–B2 level.
-
-Built with Python · tkinter · gTTS
+- [Microsoft edge-tts](https://github.com/rany2/edge-tts) for German neural voices
+- [Pixabay](https://pixabay.com) for free image search
+- [Anki](https://apps.ankiweb.net) for the flashcard platform
