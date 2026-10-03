@@ -1,0 +1,26 @@
+<!--
+  PRODUCTION (REVERSED) — FRONT
+  English shown; typed answer required (not self-graded). full_answer
+  holds exactly what should be typed: "der Tisch" for nouns, bare
+  infinitive "brauchen" for verbs. Wrong article = wrong answer,
+  since {{type:}} grades the whole string as one unit.
+-->
+<div class="card">
+
+<div class="type-badge {{word_type}}">{{word_type}}</div>
+<div class="prompt-label">Translate to German</div>
+
+{{#image_url}}
+<div class="image-box"><img src="{{image_url}}"></div>
+{{/image_url}}
+
+<div class="translation">{{english_translation}}</div>
+{{#sense_hint}}<div class="sense-hint">({{sense_hint}})</div>{{/sense_hint}}
+
+{{#english_sentence}}
+<div class="context-sentence">{{english_sentence}}</div>
+{{/english_sentence}}
+
+{{type:full_answer}}
+
+</div>

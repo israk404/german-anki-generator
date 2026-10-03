@@ -1,0 +1,12 @@
+<!--
+  GENDER DRILL — FRONT
+  Generated only when article is set AND plural_only is empty, so
+  plural-only nouns (die Leute, die Eltern) never produce a card
+  that "teaches" nothing.
+-->
+{{#article}}{{^plural_only}}
+<div class="card">
+  <div class="prompt-label">Der, die, or das?</div>
+  <div class="drill-word">{{target_word}}</div>
+</div>
+{{/plural_only}}{{/article}}

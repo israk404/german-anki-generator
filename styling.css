@@ -1,0 +1,198 @@
+/* ═══════════════════════════════════════════════════════════════════════
+   German Anki Generator · v8 · Synthesized from multi-AI review
+   Recognition (no article on front) · Production (typed) · Gender Drill
+   ═══════════════════════════════════════════════════════════════════════ */
+
+.card {
+  font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;
+  background: #F8FAFC;
+  color: #1E293B;
+  max-width: 580px;
+  margin: 0 auto;
+  padding: 24px 20px 32px;
+  font-size: 15px;
+  line-height: 1.65;
+}
+
+.type-badge {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  padding: 3px 12px;
+  border-radius: 99px;
+  margin-bottom: 14px;
+  background: #E2E8F0;
+  color: #64748B;
+}
+.type-badge.noun       { background: #DBEAFE; color: #1D4ED8; }
+.type-badge.verb       { background: #FEF3C7; color: #92400E; }
+.type-badge.adjective  { background: #DCFCE7; color: #15803D; }
+.type-badge.phrase     { background: #F3E8FF; color: #7E22CE; }
+
+.prompt-label {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .08em;
+  color: #9333EA;
+  margin-bottom: 10px;
+}
+
+.article-big       { font-weight: 700; font-size: 34px; margin-right: 10px; }
+.article-big.der   { color: #2563EB; }
+.article-big.die   { color: #DC2626; }
+.article-big.das   { color: #16A34A; }
+
+.target-word {
+  font-size: 44px;
+  font-weight: 800;
+  letter-spacing: -.5px;
+  margin-bottom: 8px;
+  color: #0F172A;
+  line-height: 1.1;
+}
+.target-word-row { display: flex; align-items: baseline; flex-wrap: wrap; }
+.meta-line { font-size: 13px; color: #64748B; margin: -4px 0 12px; }
+
+.translation {
+  font-size: 32px;
+  font-weight: 700;
+  color: #1E293B;
+  margin-bottom: 4px;
+  line-height: 1.2;
+}
+.sense-hint { font-size: 13px; color: #94A3B8; font-style: italic; margin-bottom: 8px; }
+.context-sentence { font-size: 14px; color: #64748B; font-style: italic; margin-top: 6px; }
+
+.audio-row { margin: 10px 0 2px; }
+.image-box { margin: 0 0 16px; text-align: center; }
+.image-box img {
+  width: 100%; max-height: 180px; border-radius: 12px;
+  object-fit: cover; display: block; border: 1px solid #E2E8F0;
+}
+
+/* Typed-answer input (Production) */
+.card input[type="text"] {
+  font-size: 20px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  border: 1.5px solid #CBD5E1;
+  width: 90%;
+  margin-top: 12px;
+  font-family: inherit;
+}
+.typeGood { background: #DCFCE7; color: #15803D; border-radius: 3px; padding: 0 2px; }
+.typeBad  { background: #FEE2E2; color: #DC2626; border-radius: 3px; padding: 0 2px; text-decoration: line-through; }
+.typeMissed { color: #DC2626; font-weight: 700; }
+
+.pron-block {
+  background: #F1F5F9; border-radius: 8px; padding: 10px 14px;
+  font-size: 15px; font-family: serif; color: #334155; margin-bottom: 14px;
+}
+.pron-native { font-size: 13px; font-family: 'Segoe UI', sans-serif; color: #6366F1; margin-top: 4px; letter-spacing: 0.02em; }
+.pron-tip { font-size: 12px; font-family: 'Segoe UI', sans-serif; color: #059669; margin-top: 4px; font-style: italic; }
+
+.divider { border: none; border-top: 1px solid #E2E8F0; margin: 18px 0; }
+
+.sentence-box {
+  background: #FFFFFF; border: 1.5px solid #E2E8F0; border-radius: 12px;
+  padding: 14px 16px; margin: 14px 0;
+}
+.de-sent { font-size: 16px; font-weight: 600; margin-bottom: 5px; color: #0F172A; }
+.en-sent { font-size: 13px; color: #64748B; }
+.sent-audio { display: inline-block; vertical-align: middle; margin-left: 4px; }
+
+.section-block { margin-bottom: 10px; }
+.sec-label {
+  font-size: 10px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: .08em; color: #94A3B8; margin-bottom: 4px;
+}
+.sec-body { font-size: 13px; color: #334155; line-height: 1.6; }
+
+/* Confusables — distinct tint, deliberately a warning, not decoration */
+.confusable-block {
+  background: #FFF1F2; border: 1px solid #FECDD3; border-radius: 8px;
+  padding: 8px 12px; margin-bottom: 10px;
+}
+.confusable-block .sec-label, .confusable-block .sec-body { color: #9F1239; }
+
+.grammar-details {
+  margin: 14px 0 10px; border: 1px solid #E2E8F0; border-radius: 8px; overflow: hidden;
+}
+.grammar-details summary {
+  font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .07em;
+  color: #94A3B8; padding: 8px 12px; cursor: pointer; background: #F8FAFC;
+  list-style: none; user-select: none;
+}
+.grammar-details summary::-webkit-details-marker { display: none; }
+.grammar-details summary::before { content: '▶ '; font-size: 8px; }
+.grammar-details[open] summary::before { content: '▼ '; font-size: 8px; }
+.grammar-details[open] summary { border-bottom: 1px solid #E2E8F0; }
+.grammar-grid { padding: 10px 12px; }
+.grammar-row { font-size: 13px; color: #475569; margin-bottom: 5px; }
+.grammar-row:last-child { margin-bottom: 0; }
+.lbl {
+  font-weight: 700; font-size: 10px; text-transform: uppercase; letter-spacing: .05em;
+  color: #94A3B8; margin-right: 10px; display: inline-block; width: 88px;
+}
+.case-gov {
+  display: inline-block; font-size: 11px; font-weight: 700; padding: 2px 8px;
+  border-radius: 6px; background: #FEF3C7; color: #92400E; margin-left: 2px;
+}
+
+.notes-box {
+  background: #FFFBEB; border-left: 3px solid #F59E0B; border-radius: 6px;
+  padding: 10px 14px; font-size: 13px; color: #78350F; margin-top: 14px; line-height: 1.6;
+}
+
+/* Gender Drill */
+.drill-word { font-size: 52px; font-weight: 800; color: #0F172A; text-align: center; margin: 28px 0; line-height: 1.1; }
+.drill-answer { text-align: center; margin: 24px 0; }
+.drill-answer .article-big { font-size: 56px; }
+.drill-answer .target-word { display: inline; font-size: 52px; }
+.drill-plural { text-align: center; font-size: 13px; color: #94A3B8; margin-top: 4px; }
+
+/* ═══════════════════════════════════════════════════════════════════════
+   NIGHT MODE
+   ═══════════════════════════════════════════════════════════════════════ */
+.nightMode .card          { background: #0F172A; color: #E2E8F0; }
+.nightMode .target-word   { color: #F8FAFC; }
+.nightMode .translation   { color: #F1F5F9; }
+.nightMode .drill-word    { color: #F8FAFC; }
+.nightMode .meta-line     { color: #94A3B8; }
+.nightMode .sense-hint    { color: #64748B; }
+
+.nightMode .card input[type="text"] { background: #1E293B; border-color: #334155; color: #F1F5F9; }
+.nightMode .typeGood { background: #052e16; color: #86EFAC; }
+.nightMode .typeBad  { background: #1C1400; color: #FCA5A5; }
+
+.nightMode .sentence-box  { background: #1E293B; border-color: #334155; }
+.nightMode .de-sent       { color: #F1F5F9; }
+.nightMode .en-sent       { color: #94A3B8; }
+
+.nightMode .pron-block    { background: #1E293B; color: #CBD5E1; }
+.nightMode .pron-native   { color: #818CF8; }
+.nightMode .pron-tip      { color: #34D399; }
+
+.nightMode .notes-box     { background: #1C1400; border-color: #B45309; color: #FDE68A; }
+.nightMode .confusable-block { background: #1C0A0D; border-color: #7F1D2E; }
+.nightMode .confusable-block .sec-label, .nightMode .confusable-block .sec-body { color: #FCA5A5; }
+
+.nightMode .grammar-details         { border-color: #334155; }
+.nightMode .grammar-details summary { background: #1E293B; color: #64748B; }
+.nightMode .grammar-details[open] summary { border-color: #334155; }
+.nightMode .grammar-row             { color: #94A3B8; }
+.nightMode .case-gov                { background: #1C1200; color: #FCD34D; }
+
+.nightMode .image-box img { border-color: #334155; }
+.nightMode .divider       { border-color: #334155; }
+.nightMode .sec-body      { color: #94A3B8; }
+.nightMode .context-sentence { color: #94A3B8; }
+.nightMode .drill-plural  { color: #64748B; }
+.nightMode .type-badge        { background: #334155; color: #94A3B8; }
+.nightMode .type-badge.noun   { background: #1E3A5F; color: #93C5FD; }
+.nightMode .type-badge.verb   { background: #1C1200; color: #FCD34D; }
+.nightMode .type-badge.adjective { background: #052e16; color: #86EFAC; }
+.nightMode .type-badge.phrase    { background: #2E1065; color: #D8B4FE; }

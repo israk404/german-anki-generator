@@ -1,0 +1,57 @@
+<!-- PRODUCTION (REVERSED) — BACK -->
+{{FrontSide}}
+<hr class="divider">
+
+<div class="target-word-row">
+  {{#article}}<span class="article-big {{article}}">{{article}}</span>{{/article}}
+  <span class="target-word">{{target_word}}</span>
+</div>
+<div class="audio-row">{{audio_word}}</div>
+{{#plural}}<div class="meta-line">Plural: {{plural}}</div>{{/plural}}
+
+<div class="sentence-box">
+  <div class="de-sent">{{german_sentence}} <span class="sent-audio">{{audio_sentence}}</span></div>
+  <div class="en-sent">{{english_sentence}}</div>
+</div>
+
+{{#pronunciation_ipa}}
+<div class="pron-block">
+  {{pronunciation_ipa}}
+  {{#pronunciation_native}}<div class="pron-native">{{pronunciation_native}}</div>{{/pronunciation_native}}
+  {{#memory_tip}}<div class="pron-tip">💡 {{memory_tip}}</div>{{/memory_tip}}
+</div>
+{{/pronunciation_ipa}}
+
+{{#confusable}}
+<div class="section-block confusable-block">
+  <div class="sec-label">Watch out — don't confuse with</div>
+  <div class="sec-body">{{confusable}}</div>
+</div>
+{{/confusable}}
+
+{{#collocations}}
+<div class="section-block">
+  <div class="sec-label">Common phrases</div>
+  <div class="sec-body">{{collocations}}</div>
+</div>
+{{/collocations}}
+
+<details class="grammar-details">
+<summary>Grammar details</summary>
+<div class="grammar-grid">
+  {{#genitive}}<div class="grammar-row"><span class="lbl">Genitive</span>{{genitive}}</div>{{/genitive}}
+  {{#present_3sg}}<div class="grammar-row"><span class="lbl">3sg present</span>{{present_3sg}}</div>{{/present_3sg}}
+  {{#preterite}}<div class="grammar-row"><span class="lbl">Preterite</span>{{preterite}}</div>{{/preterite}}
+  {{#past_participle}}<div class="grammar-row"><span class="lbl">Perfect</span>{{auxiliary}} + {{past_participle}}</div>{{/past_participle}}
+  {{#valency}}<div class="grammar-row"><span class="lbl">Valency</span><span class="case-gov">{{valency}}</span></div>{{/valency}}
+  {{#separable}}<div class="grammar-row"><span class="lbl">Separable</span>{{separable}}</div>{{/separable}}
+  {{#reflexive}}<div class="grammar-row"><span class="lbl">Reflexive</span>{{reflexive}}</div>{{/reflexive}}
+  {{#comparative}}<div class="grammar-row"><span class="lbl">Comparative</span>{{comparative}} &middot; {{superlative}}</div>{{/comparative}}
+  {{#register}}<div class="grammar-row"><span class="lbl">Register</span>{{register}}</div>{{/register}}
+  {{#word_family}}<div class="grammar-row"><span class="lbl">Word family</span>{{word_family}}</div>{{/word_family}}
+</div>
+</details>
+
+{{#notes}}
+<div class="notes-box">💡 {{notes}}</div>
+{{/notes}}
