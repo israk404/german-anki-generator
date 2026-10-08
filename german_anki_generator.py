@@ -104,7 +104,7 @@ VERIFIER_APPLY_FIELDS = {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PROMPTS (unchanged — same content as v8)
+# PROMPTS
 # ─────────────────────────────────────────────────────────────────────────────
 
 MASTER_PROMPT = '''You are generating data for a German language Anki deck.
@@ -272,17 +272,58 @@ def load_session():
 def clear_session():
     try: SESSION_FILE.unlink(missing_ok=True)
     except Exception: pass
+
+# ── Encoding-robust history read ──────────────────────────────────────────────
 def load_word_history():
+    """Return lowercase set of all words ever processed.
+    Robust to encoding differences (UTF-8, UTF-8-BOM, UTF-16, ANSI/cp1252)
+    that appear when the file is edited by PowerShell's Set-Content,
+    Notepad, or other tools that don't default to UTF-8."""
     if not HISTORY_FILE.exists(): return set()
-    try: return set(HISTORY_FILE.read_text(encoding="utf-8").splitlines())
-    except Exception: return set()
+    try:
+        raw = HISTORY_FILE.read_bytes()
+    except Exception:
+        return set()
+    if not raw:
+        return set()
+
+    # Detect encoding: BOM first, then try UTF-8 strictly, else ANSI
+    if raw.startswith(b"\xff\xfe") or raw.startswith(b"\xfe\xff"):
+        enc = "utf-16"
+    elif raw.startswith(b"\xef\xbb\xbf"):
+        enc = "utf-8-sig"
+    else:
+        try:
+            raw.decode("utf-8"); enc = "utf-8"
+        except UnicodeDecodeError:
+            enc = "cp1252"
+
+    try:
+        text = raw.decode(enc, errors="replace")
+    except Exception:
+        return set()
+
+    text = text.replace("\x00", "")  # strip any UTF-16 remnants
+    return {line.strip().lower() for line in text.splitlines() if line.strip()}
+
+# ── Encoding-robust history write ─────────────────────────────────────────────
 def append_word_history(words):
+    """Store lowercase. Rewrites the whole file in UTF-8 to normalize
+    encoding, so future reads never hit the mismatch bug again."""
     try:
         existing = load_word_history()
-        with open(HISTORY_FILE, "a", encoding="utf-8") as f:
-            for w in words:
-                if w not in existing: f.write(w + "\n")
+        for w in words:
+            wl = str(w).strip().lower()
+            if wl:
+                existing.add(wl)
+        if not existing:
+            return
+        # Atomic-ish write: temp file then replace, so a crash can't corrupt it
+        tmp = HISTORY_FILE.with_suffix(".tmp")
+        tmp.write_text("\n".join(sorted(existing)) + "\n", encoding="utf-8")
+        tmp.replace(HISTORY_FILE)
     except Exception: pass
+
 def load_stats():
     stats = {"total":0,"noun":0,"verb":0,"adjective":0,"phrase":0,"sessions":0}
     bd = Path("anki_output/backups")
@@ -495,7 +536,6 @@ class GermanAnkiGenerator:
             value = f'"{value}"'
         return value
 
-    # ── NEW: sentence hash for unique audio filenames ───────────────────────
     def _sentence_hash(self, sentence):
         """8-char hash of the sentence text. Two different sentences for the
         same word produce two different hashes, so their MP3s never collide."""
@@ -548,7 +588,6 @@ class GermanAnkiGenerator:
             word_text = f"{article} {word}".strip() if article else word
             word_fn   = self.sanitize_filename(f"{article}_{word}".strip("_"))
 
-            # UNIQUE sentence filename via hash
             s1 = entry.get("german_sentence","")
             sent_fn = self.sanitize_filename(
                 f"sent_{word_fn}_{self._sentence_hash(s1)}")
@@ -828,7 +867,6 @@ class AnkiGeneratorGUI:
                     relief="flat", padding=4)
 
     def _build_ui(self):
-        # Header
         hdr = tk.Frame(self.root, bg=self.SURFACE)
         hdr.pack(fill=tk.X)
         tk.Frame(hdr, bg=self.ACCENT, width=4).pack(side=tk.LEFT, fill=tk.Y)
@@ -846,7 +884,6 @@ class AnkiGeneratorGUI:
         self.status_lbl.pack(side=tk.RIGHT)
         tk.Frame(self.root, bg=self.BORDER, height=1).pack(fill=tk.X)
 
-        # Bottom action bar
         bot = tk.Frame(self.root, bg=self.SURFACE, pady=12)
         bot.pack(fill=tk.X, padx=20, side=tk.BOTTOM)
         tk.Frame(self.root, bg=self.BORDER, height=1).pack(fill=tk.X, side=tk.BOTTOM)
@@ -872,7 +909,6 @@ class AnkiGeneratorGUI:
                                   style="Primary.TButton", command=self._generate)
         self.gen_btn.pack(side=tk.RIGHT)
 
-        # Body
         body = tk.Frame(self.root, bg=self.BG)
         body.pack(fill=tk.BOTH, expand=True, padx=20, pady=(16,0))
 
@@ -885,10 +921,6 @@ class AnkiGeneratorGUI:
         nb_frame = tk.Frame(body, bg=self.BG)
         nb_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self._build_notebook(nb_frame)
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # SIDEBAR
-    # ─────────────────────────────────────────────────────────────────────────
 
     def _build_sidebar(self, parent):
         sb_canvas = tk.Canvas(parent, bg=self.SIDEBAR_BG, highlightthickness=0)
@@ -957,10 +989,6 @@ class AnkiGeneratorGUI:
                      font=("Segoe UI", 8), anchor="w").pack(fill=tk.X, padx=18, pady=1)
         tk.Frame(inner, bg=self.SIDEBAR_BG, height=16).pack()
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # NOTEBOOK
-    # ─────────────────────────────────────────────────────────────────────────
-
     def _build_notebook(self, parent):
         self.nb = ttk.Notebook(parent)
         self.nb.pack(fill=tk.BOTH, expand=True)
@@ -975,10 +1003,6 @@ class AnkiGeneratorGUI:
             f = ttk.Frame(self.nb, style="Surface.TFrame", padding=18)
             self.nb.add(f, text=label)
             builder(f)
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # TAB 0 — INPUT
-    # ─────────────────────────────────────────────────────────────────────────
 
     def _build_word_input_tab(self, parent):
         tk.Label(parent, text="Words to process",
@@ -1044,10 +1068,6 @@ class AnkiGeneratorGUI:
                         ("info",self.LOG_INFO),("warn",self.WARN)]:
             self.log_box.tag_configure(tag, foreground=fg)
         self._log("Ready. Enter words above and click Process words.", "info")
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # TAB 1 — PREVIEW (with checkbox dropdown + full field editing)
-    # ─────────────────────────────────────────────────────────────────────────
 
     def _build_preview_tab(self, parent):
         top = tk.Frame(parent, bg=self.SURFACE)
@@ -1143,10 +1163,6 @@ class AnkiGeneratorGUI:
         tree_wrap.grid_columnconfigure(0, weight=1)
         self.tree.bind("<Double-1>", self._on_tree_double_click)
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # TAB 2 — STATS
-    # ─────────────────────────────────────────────────────────────────────────
-
     def _build_stats_tab(self, parent):
         tk.Label(parent, text="Lifetime statistics",
                  bg=self.SURFACE, fg=self.TEXT,
@@ -1196,10 +1212,6 @@ class AnkiGeneratorGUI:
         self.session_stats_lbl.config(
             text=f"{nn} words  ·  {n} nouns  ·  {v} verbs  ·  {a} adj  ·  {p} phrases")
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # TAB 3 — PROMPTS (both generation and verification)
-    # ─────────────────────────────────────────────────────────────────────────
-
     def _build_prompt_tab(self, parent):
         bar = tk.Frame(parent, bg=self.SURFACE)
         bar.pack(fill=tk.X, pady=(0,10))
@@ -1229,10 +1241,6 @@ class AnkiGeneratorGUI:
             bg=self.ENTRY_BG, fg=self.TEXT, padx=14, pady=12, state="disabled")
         self.prompt_box.pack(fill=tk.BOTH, expand=True)
         self._refresh_prompt_box()
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # TAB 4 — SETTINGS
-    # ─────────────────────────────────────────────────────────────────────────
 
     def _build_settings_tab(self, parent):
         canvas = tk.Canvas(parent, bg=self.SURFACE, highlightthickness=0)
@@ -1270,7 +1278,6 @@ class AnkiGeneratorGUI:
             e.pack(fill=tk.X,pady=(0,8),ipady=6,ipadx=8)
             return e
 
-        # COL 0 — API keys
         sec(col_keys, "API keys")
         for title, hint, ck, la, ca, va in [
             ("Gemini", "aistudio.google.com · free",
@@ -1321,7 +1328,6 @@ class AnkiGeneratorGUI:
         ttk.Button(col_keys,text="Test active provider",style="Soft.TButton",
                    command=self._test_keys).pack(anchor="w",pady=(10,0))
 
-        # COL 1 — Generator + verifier + overnight
         sec(col_pipeline, "Generator")
         lbl(col_pipeline,"Provider")
         pf = tk.Frame(col_pipeline,bg=self.SURFACE); pf.pack(anchor="w",pady=(0,8))
@@ -1425,7 +1431,6 @@ class AnkiGeneratorGUI:
             sc.bind("<ButtonRelease-1>",
                     lambda e,_k=key,_v=var: self.config.set(_k, round(_v.get(),1)))
 
-        # COL 2 — Audio
         sec(col_audio,"Audio · word")
         lbl(col_audio,"Word voice")
         vw = ttk.Combobox(col_audio,textvariable=self.voice_word_var,
@@ -1475,7 +1480,6 @@ class AnkiGeneratorGUI:
                  bg=self.SURFACE,fg=self.TEXT_MUTED,font=("Segoe UI", 8),
                  justify="left").pack(anchor="w",pady=(12,0))
 
-        # COL 3 — Export
         sec(col_export,"Export")
         lbl(col_export,"Deck name")
         de2 = ent(col_export,self.deck_name_var)
@@ -1513,10 +1517,6 @@ class AnkiGeneratorGUI:
                    command=self._save_pixabay_key).pack(anchor="w",pady=(0,6))
         tk.Label(col_export,text="pixabay.com/api/docs — free key",
                  bg=self.SURFACE,fg=self.TEXT_MUTED,font=("Segoe UI", 8)).pack(anchor="w")
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # KEY MANAGEMENT
-    # ─────────────────────────────────────────────────────────────────────────
 
     def _add_key(self, ck, la, ca, va):
         raw = getattr(self, va).get().strip()
@@ -1585,15 +1585,50 @@ class AnkiGeneratorGUI:
         if not words:
             messagebox.showwarning("No words", "Could not parse any words."); return
 
+        # ── EDIT 3 — batch dedup + 3-way duplicate dialog ────────────────────
+        seen = set()
+        deduped = []
+        for w in words:
+            wl = w.strip().lower()
+            if wl and wl not in seen:
+                seen.add(wl)
+                deduped.append(w.strip())
+        if len(deduped) < len(words):
+            self._log(f"ℹ Removed {len(words) - len(deduped)} duplicate(s) from the input list.", "info")
+        words = deduped
+
         history = load_word_history()
-        in_session = {e.get("target_word","").lower() for e in self.parsed_data}
-        dupes_history = [w for w in words if w.lower() in history]
-        dupes_session = [w for w in words if w.lower() in in_session]
-        if dupes_session:
-            if not messagebox.askyesno("Duplicates in session",
-                f"Already processed this session:\n{', '.join(dupes_session)}\nContinue?"): return
-        if dupes_history and not dupes_session:
-            self._log(f"⚠ Previously processed: {', '.join(dupes_history[:5])}", "warn")
+        in_session = {str(e.get("target_word","")).strip().lower()
+                      for e in self.parsed_data if e.get("target_word")}
+        dupes_history = [w for w in words if w.strip().lower() in history]
+        dupes_session = [w for w in words if w.strip().lower() in in_session]
+
+        if dupes_history or dupes_session:
+            lines = []
+            if dupes_session:
+                preview = ", ".join(dupes_session[:8]) + ("…" if len(dupes_session) > 8 else "")
+                lines.append(f"In this session ({len(dupes_session)}): {preview}")
+            if dupes_history:
+                preview = ", ".join(dupes_history[:8]) + ("…" if len(dupes_history) > 8 else "")
+                lines.append(f"Previously processed ({len(dupes_history)}): {preview}")
+            msg = ("Duplicate words found:\n\n" + "\n\n".join(lines) +
+                   "\n\nYes = process all (re-generate)\nNo = skip duplicates\nCancel = abort")
+            choice = messagebox.askyesnocancel("Duplicates found", msg)
+            if choice is None:
+                return
+            if choice is False:
+                skip = {w.strip().lower() for w in dupes_history + dupes_session}
+                words = [w for w in words if w.strip().lower() not in skip]
+                self._log(f"ℹ Skipped {len(skip)} known word(s). "
+                          f"Processing {len(words)} new word(s).", "info")
+                if not words:
+                    messagebox.showinfo("Nothing to do",
+                        "All entered words have already been processed.")
+                    return
+            else:
+                self._log(f"⚠ Proceeding with {len(dupes_history)+len(dupes_session)} "
+                          f"duplicate(s) — they will be re-generated.", "warn")
+        # ─────────────────────────────────────────────────────────────────────
 
         self.queue_lbl.config(text=f"{len(words)} word(s): {', '.join(words[:5])}{'…' if len(words)>5 else ''}")
         self._stop_flag = False; self._processing = True; self._overnight_pass = 0
@@ -1839,10 +1874,6 @@ class AnkiGeneratorGUI:
         self._stop_flag = True
         self._log("Stop requested…", "warn")
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # PROMPT
-    # ─────────────────────────────────────────────────────────────────────────
-
     def _build_prompt(self, word, lang):
         return MASTER_PROMPT.replace("<<LANG>>", lang).replace("<<WORD>>", word)
 
@@ -1877,10 +1908,6 @@ class AnkiGeneratorGUI:
         else: self.root.clipboard_clear(); self.root.clipboard_append(prompt)
         self._set_status("Copied ✓", self.SUCCESS)
         self.root.after(2000, lambda: self._set_status("● Ready", self.SUCCESS))
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # PREVIEW
-    # ─────────────────────────────────────────────────────────────────────────
 
     def _refresh_preview(self):
         data = self.parsed_data
@@ -1918,7 +1945,6 @@ class AnkiGeneratorGUI:
                 checked_state.append(self._card_select_vars[idx].get())
             else:
                 checked_state.append(True)
-        # store as mutable list so the popup can toggle it
         self._dropdown_state = checked_state
 
         def on_change(local_idx, value):
@@ -2033,7 +2059,6 @@ class AnkiGeneratorGUI:
         values = self.tree.item(item, "values")
         if not values: return
         field = values[1]
-        # All fields editable now — including image_url if user wants to paste a custom URL
         i = getattr(self, "_current_preview_idx", 0)
         if i < 0 or i >= len(self._filtered_indices): return
         idx = self._filtered_indices[i]
@@ -2085,10 +2110,6 @@ class AnkiGeneratorGUI:
             GermanAnkiGenerator().play_audio(
                 s, self.voice_sent_var.get(), self.audio_speed_var.get())
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # GENERATE FILES
-    # ─────────────────────────────────────────────────────────────────────────
-
     def _get_selected_indices(self):
         sel = [i for i, v in enumerate(self._card_select_vars) if v.get()]
         return sel if len(sel) < len(self.parsed_data) else None
@@ -2133,10 +2154,6 @@ class AnkiGeneratorGUI:
         else:
             self._set_status(f"✗ {msg}", self.ERROR)
             messagebox.showerror("Error", msg)
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # MISC
-    # ─────────────────────────────────────────────────────────────────────────
 
     def _test_keys(self):
         provider = self.provider_var.get()
