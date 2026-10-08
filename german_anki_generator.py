@@ -62,17 +62,20 @@ HISTORY_FILE = Path("anki_word_history.txt")
 
 PROVIDERS = ["Gemini", "Groq", "Custom (OpenAI-compatible)"]
 
-# Only 3 German voices are reliably available on the current edge-tts backend.
-# The other 7 in the original list are not consistently served by Microsoft's
-# endpoint — they either silently fail or raise NoAudioReceived.
 DE_VOICES = [
-    "de-DE-ConradNeural",   # male  · narrator
-    "de-DE-KatjaNeural",    # female · natural
-    "de-DE-AmalaNeural",    # female · younger
+    "de-DE-ConradNeural",
+    "de-DE-KatjaNeural",
+    "de-DE-AmalaNeural",
 ]
 
 GEMINI_MODELS = ["gemini-3.6-flash","gemini-3.5-flash-lite","gemini-3.1-pro-preview"]
 GROQ_MODELS   = ["openai/gpt-oss-120b","qwen/qwen3.8-27b","openai/gpt-oss-20b"]
+
+# Per-call timeout enforced by _call_with_timeout (seconds).
+# If the model holds the socket open past this, we abandon it and move on.
+# 90s is long enough for a slow-but-working Gemini call and short enough
+# to fail fast when the free-tier quota is silently exhausted.
+API_CALL_TIMEOUT_S = 90
 
 GENDER_COLORS = {"der":"#2563EB","die":"#DC2626","das":"#16A34A","":"#94A3B8"}
 TYPE_COLORS   = {"noun":"#DBEAFE","verb":"#FEF3C7","adjective":"#DCFCE7","phrase":"#F3E8FF"}
@@ -273,12 +276,9 @@ def clear_session():
     try: SESSION_FILE.unlink(missing_ok=True)
     except Exception: pass
 
-# ── Encoding-robust history read ──────────────────────────────────────────────
 def load_word_history():
     """Return lowercase set of all words ever processed.
-    Robust to encoding differences (UTF-8, UTF-8-BOM, UTF-16, ANSI/cp1252)
-    that appear when the file is edited by PowerShell's Set-Content,
-    Notepad, or other tools that don't default to UTF-8."""
+    Robust to encoding differences (UTF-8, UTF-8-BOM, UTF-16, ANSI/cp1252)."""
     if not HISTORY_FILE.exists(): return set()
     try:
         raw = HISTORY_FILE.read_bytes()
@@ -286,8 +286,6 @@ def load_word_history():
         return set()
     if not raw:
         return set()
-
-    # Detect encoding: BOM first, then try UTF-8 strictly, else ANSI
     if raw.startswith(b"\xff\xfe") or raw.startswith(b"\xfe\xff"):
         enc = "utf-16"
     elif raw.startswith(b"\xef\xbb\xbf"):
@@ -297,19 +295,15 @@ def load_word_history():
             raw.decode("utf-8"); enc = "utf-8"
         except UnicodeDecodeError:
             enc = "cp1252"
-
     try:
         text = raw.decode(enc, errors="replace")
     except Exception:
         return set()
-
-    text = text.replace("\x00", "")  # strip any UTF-16 remnants
+    text = text.replace("\x00", "")
     return {line.strip().lower() for line in text.splitlines() if line.strip()}
 
-# ── Encoding-robust history write ─────────────────────────────────────────────
 def append_word_history(words):
-    """Store lowercase. Rewrites the whole file in UTF-8 to normalize
-    encoding, so future reads never hit the mismatch bug again."""
+    """Store lowercase. Rewrites the whole file in UTF-8 to normalize encoding."""
     try:
         existing = load_word_history()
         for w in words:
@@ -318,7 +312,6 @@ def append_word_history(words):
                 existing.add(wl)
         if not existing:
             return
-        # Atomic-ish write: temp file then replace, so a crash can't corrupt it
         tmp = HISTORY_FILE.with_suffix(".tmp")
         tmp.write_text("\n".join(sorted(existing)) + "\n", encoding="utf-8")
         tmp.replace(HISTORY_FILE)
@@ -346,28 +339,55 @@ def load_stats():
 
 class PixabayClient:
     BASE = ("https://pixabay.com/api/?key={key}&q={q}"
-            "&image_type=photo&per_page=5&safesearch=true&lang=en&order=popular")
+            "&image_type=photo&per_page=5&safesearch=true"
+            "&orientation=horizontal&order=popular&lang={lang}")
+
     @staticmethod
-    def fetch(target_word, english_translation, word_type, api_key):
-        if word_type != "noun" or not api_key: return ""
-        en = english_translation.split(",")[0].split("/")[0].strip()
-        if not en: return ""
-        try:
-            url = PixabayClient.BASE.format(
-                key=urllib.parse.quote(api_key), q=urllib.parse.quote(en[:50]))
-            req = urllib.request.Request(url, headers={"User-Agent":"AnkiGenerator/9.0"})
-            with urllib.request.urlopen(req, timeout=8) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-            for hit in data.get("hits",[]):
-                img = hit.get("largeImageURL","") or hit.get("webformatURL","")
-                if img: return img
-        except Exception: pass
+    def fetch(target_word, english_translation, sense_hint, word_type, api_key):
+        if word_type != "noun" or not api_key:
+            return ""
+
+        de = (target_word or "").strip()
+        en = (english_translation or "").split(",")[0].split("/")[0].strip()
+        sh = (sense_hint or "").strip()
+        sh_clean = re.sub(r'\([^)]*\)', '', sh).strip()
+
+        queries = []
+        if sh_clean:
+            queries.append((sh_clean, "de"))
+        if de:
+            queries.append((de, "de"))
+        if en:
+            queries.append((en, "en"))
+
+        for query, lang in queries:
+            if not query:
+                continue
+            try:
+                url = PixabayClient.BASE.format(
+                    key=urllib.parse.quote(api_key),
+                    q=urllib.parse.quote(query[:50]),
+                    lang=lang)
+                req = urllib.request.Request(
+                    url, headers={"User-Agent":"AnkiGenerator/9.0"})
+                with urllib.request.urlopen(req, timeout=8) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                hits = data.get("hits", [])
+                if hits:
+                    img = (hits[0].get("largeImageURL","")
+                           or hits[0].get("webformatURL",""))
+                    if img:
+                        return img
+            except Exception:
+                continue
         return ""
+
     @staticmethod
     def fetch_thumbnail(url, size=80):
         if not PIL_AVAILABLE or not url: return None
         try:
-            req = urllib.request.Request(url, headers={"User-Agent":"AnkiGenerator/9.0"})
+            req = urllib.request.Request(
+                url, headers={"User-Agent":"AnkiGenerator/9.0"})
             with urllib.request.urlopen(req, timeout=8) as resp:
                 data = resp.read()
             img = Image.open(io.BytesIO(data))
@@ -379,39 +399,93 @@ class PixabayClient:
 # AI CLIENTS
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _call_with_timeout(fn, timeout_s, label="API call"):
+    """Run fn() on a daemon thread, abandon it if it exceeds timeout_s.
+
+    This is the *only* reliable way to time out google-genai and groq calls.
+    Their SDK-level timeouts (HttpOptions, Groq timeout=) are silently ignored
+    on some versions, and a silently-exhausted free-tier quota holds the
+    socket open indefinitely with no HTTP response.
+
+    On timeout we raise TimeoutError; the abandoned thread keeps running in
+    the background (daemon → dies with the process) but the pipeline moves on."""
+    result = [None]
+    error  = [None]
+    done   = threading.Event()
+
+    def _worker():
+        try:
+            result[0] = fn()
+        except Exception as e:
+            error[0] = e
+        finally:
+            done.set()
+
+    t = threading.Thread(target=_worker, daemon=True)
+    t.start()
+
+    if not done.wait(timeout=timeout_s):
+        raise TimeoutError(
+            f"{label} exceeded {timeout_s}s. "
+            f"If this happens on the FIRST word of a batch, your free-tier "
+            f"quota is likely exhausted (Gemini silently holds the socket "
+            f"instead of returning 429). Switch to gemini-3.5-flash-lite or "
+            f"wait for the midnight-Pacific reset.")
+
+    if error[0] is not None:
+        raise error[0]
+    return result[0]
+
+
 class GeminiClient:
     def __init__(self, api_keys, model):
-        if not GENAI_SDK_AVAILABLE: raise RuntimeError("Install: pip install google-genai")
+        if not GENAI_SDK_AVAILABLE:
+            raise RuntimeError("Install: pip install google-genai")
         self.api_keys = [k.strip() for k in api_keys if k.strip()]
         self.model = model; self._key_index = 0; self._clients = {}
+
     def _get_client(self, key):
-        if key not in self._clients: self._clients[key] = _genai_sdk.Client(api_key=key)
+        if key not in self._clients:
+            self._clients[key] = _genai_sdk.Client(api_key=key)
         return self._clients[key]
+
+    def _do_call(self, key, prompt):
+        """Blocking generate_content call, executed on a worker thread."""
+        resp = self._get_client(key).models.generate_content(
+            model=self.model, contents=prompt,
+            config=_genai_types.GenerateContentConfig(
+                temperature=0.3, max_output_tokens=2048))
+        text = resp.text
+        if not text or not text.strip():
+            raise ValueError("Empty response")
+        return text.strip()
+
     def generate(self, prompt):
-        if not self.api_keys: raise ValueError("No Gemini keys configured.")
+        if not self.api_keys:
+            raise ValueError("No Gemini keys configured.")
         last_error = None
         for _ in range(len(self.api_keys)):
             key = self.api_keys[self._key_index % len(self.api_keys)]
             kn  = self._key_index % len(self.api_keys) + 1
             self._key_index += 1
             try:
-                resp = self._get_client(key).models.generate_content(
-                    model=self.model, contents=prompt,
-                    config=_genai_types.GenerateContentConfig(
-                        temperature=0.3, max_output_tokens=2048))
-                text = resp.text
-                if text and text.strip(): return text.strip()
-                raise ValueError("Empty response")
+                return _call_with_timeout(
+                    lambda: self._do_call(key, prompt),
+                    timeout_s=API_CALL_TIMEOUT_S,
+                    label=f"Gemini key #{kn}")
             except Exception as e:
                 last_error = f"Key #{kn}: {e}"
         raise RuntimeError(f"All Gemini keys failed. Last: {last_error}")
 
+
 class GroqClient:
     _DEAD = ("model_not_found","model_decommissioned","does not exist","no longer supported")
     def __init__(self, api_keys, model):
-        if not GROQ_SDK_AVAILABLE: raise RuntimeError("Install: pip install groq")
+        if not GROQ_SDK_AVAILABLE:
+            raise RuntimeError("Install: pip install groq")
         self.api_keys = [k.strip() for k in api_keys if k.strip()]
         self.model = model; self.model_used = model; self._key_index = 0
+
     def _try_model(self, model_id, prompt):
         self._model_dead = False; last_err = None
         for _ in range(len(self.api_keys)):
@@ -419,11 +493,15 @@ class GroqClient:
             kn  = self._key_index % len(self.api_keys) + 1
             self._key_index += 1
             try:
-                resp = _GroqClient(api_key=key).chat.completions.create(
-                    model=model_id,
-                    messages=[{"role":"user","content":prompt}],
-                    temperature=0.3, max_tokens=2048)
-                text = resp.choices[0].message.content
+                def _do():
+                    resp = _GroqClient(api_key=key).chat.completions.create(
+                        model=model_id,
+                        messages=[{"role":"user","content":prompt}],
+                        temperature=0.3, max_tokens=2048)
+                    return resp.choices[0].message.content
+                text = _call_with_timeout(
+                    _do, timeout_s=API_CALL_TIMEOUT_S,
+                    label=f"Groq key #{kn}/{model_id}")
                 if text and text.strip(): return text.strip(), None
                 last_err = f"Key #{kn}/{model_id}: empty"
             except Exception as e:
@@ -431,6 +509,7 @@ class GroqClient:
                 if any(s in str(e) for s in self._DEAD):
                     self._model_dead = True; break
         return None, last_err
+
     def generate(self, prompt):
         if not self.api_keys: raise ValueError("No Groq keys configured.")
         chain = [self.model] + [m for m in GROQ_MODELS if m != self.model]
@@ -463,9 +542,10 @@ class CustomClient:
                 "temperature": 0.3, "max_tokens": 2048,
             }).encode("utf-8")
             req = urllib.request.Request(url, data=payload, method="POST",
-                headers={"Content-Type":"application/json","Authorization":f"Bearer {key}"})
+                headers={"Content-Type":"application/json",
+                         "Authorization":f"Bearer {key}"})
             try:
-                with urllib.request.urlopen(req, timeout=30) as resp:
+                with urllib.request.urlopen(req, timeout=60) as resp:
                     data = json.loads(resp.read().decode("utf-8"))
                 text = data["choices"][0]["message"]["content"]
                 if text and text.strip(): return text.strip()
@@ -500,7 +580,7 @@ def make_verifier(config):
     return None
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CORE GENERATOR — unique filenames fix
+# CORE GENERATOR
 # ─────────────────────────────────────────────────────────────────────────────
 
 class GermanAnkiGenerator:
@@ -537,8 +617,6 @@ class GermanAnkiGenerator:
         return value
 
     def _sentence_hash(self, sentence):
-        """8-char hash of the sentence text. Two different sentences for the
-        same word produce two different hashes, so their MP3s never collide."""
         if not sentence:
             return "nosent"
         return hashlib.md5(sentence.strip().encode("utf-8")).hexdigest()[:8]
@@ -644,7 +722,7 @@ class GermanAnkiGenerator:
         }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# MODERN THEME (indigo / slate)
+# THEME
 # ─────────────────────────────────────────────────────────────────────────────
 
 LIGHT = dict(
@@ -673,7 +751,6 @@ DARK = dict(
 # ─────────────────────────────────────────────────────────────────────────────
 
 class CheckboxDropdown(tk.Toplevel):
-    """Popup with scrollable checkbox list. Toggles per-word selection."""
     def __init__(self, parent, anchor_widget, labels, checked, on_change):
         super().__init__(parent)
         self.overrideredirect(True)
@@ -778,6 +855,10 @@ class AnkiGeneratorGUI:
         self._processing = False
         self._overnight_pass = 0
         self._prompt_mode = tk.StringVar(value="generation")
+
+        self._hb_gen = 0
+        self._hb_label = ""
+        self._hb_start = 0.0
 
         self.provider_var         = tk.StringVar(value=self.config.get("provider"))
         self.gemini_model_var     = tk.StringVar(value=self.config.get("gemini_model"))
@@ -1568,6 +1649,25 @@ class AnkiGeneratorGUI:
         self.config.set("delay_seconds", round(v,1))
 
     # ─────────────────────────────────────────────────────────────────────────
+    # HEARTBEAT
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _start_heartbeat(self, label):
+        self._hb_label = label
+        self._hb_start = time.time()
+        self._hb_gen  += 1
+        my_gen = self._hb_gen
+        def tick():
+            if my_gen != self._hb_gen: return
+            elapsed = time.time() - self._hb_start
+            self._set_status(f"⏳ {self._hb_label} — {elapsed:.0f}s", self.WARN)
+            self.root.after(1000, tick)
+        self.root.after(1000, tick)
+
+    def _stop_heartbeat(self):
+        self._hb_gen += 1
+
+    # ─────────────────────────────────────────────────────────────────────────
     # PROCESSING
     # ─────────────────────────────────────────────────────────────────────────
 
@@ -1585,7 +1685,6 @@ class AnkiGeneratorGUI:
         if not words:
             messagebox.showwarning("No words", "Could not parse any words."); return
 
-        # ── EDIT 3 — batch dedup + 3-way duplicate dialog ────────────────────
         seen = set()
         deduped = []
         for w in words:
@@ -1628,7 +1727,6 @@ class AnkiGeneratorGUI:
             else:
                 self._log(f"⚠ Proceeding with {len(dupes_history)+len(dupes_session)} "
                           f"duplicate(s) — they will be re-generated.", "warn")
-        # ─────────────────────────────────────────────────────────────────────
 
         self.queue_lbl.config(text=f"{len(words)} word(s): {', '.join(words[:5])}{'…' if len(words)>5 else ''}")
         self._stop_flag = False; self._processing = True; self._overnight_pass = 0
@@ -1654,25 +1752,32 @@ class AnkiGeneratorGUI:
                     time.sleep(1)
                 if self._stop_flag: return None, "Stopped"
             try:
+                self._start_heartbeat(f"Verifying '{word}'")
                 vp = (VERIFIER_PROMPT
                       .replace("<<WORD>>", word)
                       .replace("<<CARD_JSON>>", json.dumps(entry, ensure_ascii=False, indent=2)))
                 raw = ver_client.generate(vp)
+                self._stop_heartbeat()
                 corrections = json.loads(gen.clean_json(raw))
                 if not isinstance(corrections, dict):
                     raise ValueError("Verifier did not return a JSON object")
                 return corrections, None
             except Exception as e:
+                self._stop_heartbeat()
                 last_err = str(e)
                 self._log(f"  ✗ Verifier attempt {attempt}/{attempts}: {e}", "err")
         return None, last_err
 
     def _process_one_word(self, word, gen_client, ver_client, lang, use_pixabay, pix_key, gen):
         prompt = self._build_prompt(word, lang)
+        self._start_heartbeat(f"Generating '{word}'")
         try:
             raw_text = gen_client.generate(prompt)
         except Exception as e:
+            self._stop_heartbeat()
             return None, f"Generator error: {e}"
+        self._stop_heartbeat()
+
         cleaned = gen.clean_json(raw_text)
         try:
             entry = json.loads(cleaned)
@@ -1714,6 +1819,7 @@ class AnkiGeneratorGUI:
         if use_pixabay and pix_key:
             img = PixabayClient.fetch(entry.get("target_word",word),
                                       entry.get("english_translation",word),
+                                      entry.get("sense_hint",""),
                                       entry.get("word_type",""), pix_key)
             if img:
                 entry["image_url"] = img
