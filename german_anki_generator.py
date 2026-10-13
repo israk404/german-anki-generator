@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
-German Anki Card Generator — v9
+German Anki Card Generator — v9.1
 3 card types: Recognition (DE→EN) · Production (EN→DE) · Gender Drill
 Unique audio filenames per sentence · Modern UI · 3 verified edge-tts voices
-No AnkiConnect · Both prompts viewable · Full field editing · Checkbox entry picker
+No AnkiConnect · No Pixabay · Both prompts viewable · Full field editing
+Fix: Stop button now interrupts mid-API-call instantly (1-second polling loop).
+Fix: Auto-save completed words to session the moment Stop is pressed.
 """
 
 import json, os, sys, re, time, threading, asyncio, hashlib
@@ -45,13 +47,6 @@ try:
 except ImportError:
     CLIPBOARD_AVAILABLE = False
 
-try:
-    from PIL import Image, ImageTk
-    import io
-    PIL_AVAILABLE = True
-except ImportError:
-    PIL_AVAILABLE = False
-
 # ─────────────────────────────────────────────────────────────────────────────
 # CONSTANTS
 # ─────────────────────────────────────────────────────────────────────────────
@@ -71,10 +66,6 @@ DE_VOICES = [
 GEMINI_MODELS = ["gemini-3.6-flash","gemini-3.5-flash-lite","gemini-3.1-pro-preview"]
 GROQ_MODELS   = ["openai/gpt-oss-120b","qwen/qwen3.8-27b","openai/gpt-oss-20b"]
 
-# Per-call timeout enforced by _call_with_timeout (seconds).
-# If the model holds the socket open past this, we abandon it and move on.
-# 90s is long enough for a slow-but-working Gemini call and short enough
-# to fail fast when the free-tier quota is silently exhausted.
 API_CALL_TIMEOUT_S = 90
 
 GENDER_COLORS = {"der":"#2563EB","die":"#DC2626","das":"#16A34A","":"#94A3B8"}
@@ -89,8 +80,11 @@ NATIVE_LANGUAGES = [
     "Indonesian","Swahili","Polish","Dutch","Greek",
 ]
 
+# target_word is now field #1 to match the repositioned Anki note type.
+# Anki identifies notes by their first field — this is what makes import
+# matching work correctly (new words get Added, existing get Updated).
 UNIVERSAL_FIELDS = [
-    "word_type","target_word","full_answer","english_translation","sense_hint",
+    "target_word","word_type","full_answer","english_translation","sense_hint",
     "german_sentence","english_sentence","article","plural","genitive","plural_only",
     "present_3sg","preterite","past_participle","auxiliary","separable","reflexive",
     "valency","comparative","superlative","pronunciation_ipa","pronunciation_native",
@@ -159,7 +153,7 @@ collocations       → 3–4 fixed phrases each with English in brackets.
                      Example: "nach Hause gehen (to go home), zu Hause (at home)"
 word_family        → 2–3 related words from same root with English.
 register           → "formal"|"informal"|"neutral" — phrases only, "" otherwise
-image_url          → "" (auto-filled by app)
+image_url          → "" (unused — always leave empty)
 notes              → One key grammar rule OR the single most common mistake learners make.
 audio_word         → "" (auto-generated)
 audio_sentence     → "" (auto-generated)
@@ -236,9 +230,9 @@ class ConfigManager:
         "audio_speed":"+0%","sentence_audio":True,
         "overnight_mode":False,"max_retries":5,"backoff_base":10.0,
         "max_overnight_passes":1,"notify_on_complete":True,
-        "pixabay_key":"","delay_seconds":1.5,"native_language":"Bangla",
+        "delay_seconds":1.5,"native_language":"Bangla",
         "deck_name":"German::Vocabulary","notetype_name":"GermanAnki_v8",
-        "use_pixabay":True,"dark_mode":False,
+        "dark_mode":False,
     }
     def __init__(self):
         self._data = dict(self.DEFAULTS); self.load()
@@ -334,78 +328,20 @@ def load_stats():
     return stats
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PIXABAY
-# ─────────────────────────────────────────────────────────────────────────────
-
-class PixabayClient:
-    BASE = ("https://pixabay.com/api/?key={key}&q={q}"
-            "&image_type=photo&per_page=5&safesearch=true"
-            "&orientation=horizontal&order=popular&lang={lang}")
-
-    @staticmethod
-    def fetch(target_word, english_translation, sense_hint, word_type, api_key):
-        if word_type != "noun" or not api_key:
-            return ""
-
-        de = (target_word or "").strip()
-        en = (english_translation or "").split(",")[0].split("/")[0].strip()
-        sh = (sense_hint or "").strip()
-        sh_clean = re.sub(r'\([^)]*\)', '', sh).strip()
-
-        queries = []
-        if sh_clean:
-            queries.append((sh_clean, "de"))
-        if de:
-            queries.append((de, "de"))
-        if en:
-            queries.append((en, "en"))
-
-        for query, lang in queries:
-            if not query:
-                continue
-            try:
-                url = PixabayClient.BASE.format(
-                    key=urllib.parse.quote(api_key),
-                    q=urllib.parse.quote(query[:50]),
-                    lang=lang)
-                req = urllib.request.Request(
-                    url, headers={"User-Agent":"AnkiGenerator/9.0"})
-                with urllib.request.urlopen(req, timeout=8) as resp:
-                    data = json.loads(resp.read().decode("utf-8"))
-                hits = data.get("hits", [])
-                if hits:
-                    img = (hits[0].get("largeImageURL","")
-                           or hits[0].get("webformatURL",""))
-                    if img:
-                        return img
-            except Exception:
-                continue
-        return ""
-
-    @staticmethod
-    def fetch_thumbnail(url, size=80):
-        if not PIL_AVAILABLE or not url: return None
-        try:
-            req = urllib.request.Request(
-                url, headers={"User-Agent":"AnkiGenerator/9.0"})
-            with urllib.request.urlopen(req, timeout=8) as resp:
-                data = resp.read()
-            img = Image.open(io.BytesIO(data))
-            img.thumbnail((size, size))
-            return ImageTk.PhotoImage(img)
-        except Exception: return None
-
-# ─────────────────────────────────────────────────────────────────────────────
 # AI CLIENTS
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _call_with_timeout(fn, timeout_s, label="API call"):
+def _call_with_timeout(fn, timeout_s, label="API call", stop_check=None):
     """Run fn() on a daemon thread, abandon it if it exceeds timeout_s.
 
     This is the *only* reliable way to time out google-genai and groq calls.
     Their SDK-level timeouts (HttpOptions, Groq timeout=) are silently ignored
     on some versions, and a silently-exhausted free-tier quota holds the
     socket open indefinitely with no HTTP response.
+
+    stop_check: optional callable() → bool; if it returns True the wait is
+    aborted immediately and InterruptedError is raised, so the Stop button
+    takes effect mid-call rather than having to wait for the full timeout.
 
     On timeout we raise TimeoutError; the abandoned thread keeps running in
     the background (daemon → dies with the process) but the pipeline moves on."""
@@ -424,13 +360,22 @@ def _call_with_timeout(fn, timeout_s, label="API call"):
     t = threading.Thread(target=_worker, daemon=True)
     t.start()
 
-    if not done.wait(timeout=timeout_s):
-        raise TimeoutError(
-            f"{label} exceeded {timeout_s}s. "
-            f"If this happens on the FIRST word of a batch, your free-tier "
-            f"quota is likely exhausted (Gemini silently holds the socket "
-            f"instead of returning 429). Switch to gemini-3.5-flash-lite or "
-            f"wait for the midnight-Pacific reset.")
+    # Poll in 1-second ticks so Stop is responsive even during a hung API call.
+    deadline = time.time() + timeout_s
+    while not done.is_set():
+        if done.wait(timeout=1.0):
+            break
+        # Check stop flag first — user pressed Stop.
+        if stop_check is not None and stop_check():
+            raise InterruptedError(f"{label} cancelled by user.")
+        # Check timeout second.
+        if time.time() >= deadline:
+            raise TimeoutError(
+                f"{label} exceeded {timeout_s}s. "
+                f"If this happens on the FIRST word of a batch, your free-tier "
+                f"quota is likely exhausted (Gemini silently holds the socket "
+                f"instead of returning 429). Switch to gemini-3.5-flash-lite or "
+                f"wait for the midnight-Pacific reset.")
 
     if error[0] is not None:
         raise error[0]
@@ -443,6 +388,7 @@ class GeminiClient:
             raise RuntimeError("Install: pip install google-genai")
         self.api_keys = [k.strip() for k in api_keys if k.strip()]
         self.model = model; self._key_index = 0; self._clients = {}
+        self.stop_check = None  # set by the GUI worker before calling generate()
 
     def _get_client(self, key):
         if key not in self._clients:
@@ -450,7 +396,6 @@ class GeminiClient:
         return self._clients[key]
 
     def _do_call(self, key, prompt):
-        """Blocking generate_content call, executed on a worker thread."""
         resp = self._get_client(key).models.generate_content(
             model=self.model, contents=prompt,
             config=_genai_types.GenerateContentConfig(
@@ -465,14 +410,20 @@ class GeminiClient:
             raise ValueError("No Gemini keys configured.")
         last_error = None
         for _ in range(len(self.api_keys)):
+            # Bail immediately if stop was requested before even making the call.
+            if self.stop_check is not None and self.stop_check():
+                raise InterruptedError("Cancelled by user.")
             key = self.api_keys[self._key_index % len(self.api_keys)]
             kn  = self._key_index % len(self.api_keys) + 1
             self._key_index += 1
             try:
                 return _call_with_timeout(
-                    lambda: self._do_call(key, prompt),
+                    lambda k=key: self._do_call(k, prompt),
                     timeout_s=API_CALL_TIMEOUT_S,
-                    label=f"Gemini key #{kn}")
+                    label=f"Gemini key #{kn}",
+                    stop_check=self.stop_check)
+            except InterruptedError:
+                raise  # propagate stop signal immediately — don't try next key
             except Exception as e:
                 last_error = f"Key #{kn}: {e}"
         raise RuntimeError(f"All Gemini keys failed. Last: {last_error}")
@@ -485,25 +436,32 @@ class GroqClient:
             raise RuntimeError("Install: pip install groq")
         self.api_keys = [k.strip() for k in api_keys if k.strip()]
         self.model = model; self.model_used = model; self._key_index = 0
+        self.stop_check = None  # set by the GUI worker before calling generate()
 
     def _try_model(self, model_id, prompt):
         self._model_dead = False; last_err = None
         for _ in range(len(self.api_keys)):
+            # Bail immediately if stop was requested.
+            if self.stop_check is not None and self.stop_check():
+                raise InterruptedError("Cancelled by user.")
             key = self.api_keys[self._key_index % len(self.api_keys)]
             kn  = self._key_index % len(self.api_keys) + 1
             self._key_index += 1
             try:
-                def _do():
-                    resp = _GroqClient(api_key=key).chat.completions.create(
+                def _do(k=key):
+                    resp = _GroqClient(api_key=k).chat.completions.create(
                         model=model_id,
                         messages=[{"role":"user","content":prompt}],
                         temperature=0.3, max_tokens=2048)
                     return resp.choices[0].message.content
                 text = _call_with_timeout(
                     _do, timeout_s=API_CALL_TIMEOUT_S,
-                    label=f"Groq key #{kn}/{model_id}")
+                    label=f"Groq key #{kn}/{model_id}",
+                    stop_check=self.stop_check)
                 if text and text.strip(): return text.strip(), None
                 last_err = f"Key #{kn}/{model_id}: empty"
+            except InterruptedError:
+                raise  # propagate stop signal immediately
             except Exception as e:
                 last_err = f"Key #{kn}/{model_id}: {e}"
                 if any(s in str(e) for s in self._DEAD):
@@ -850,7 +808,6 @@ class AnkiGeneratorGUI:
         self._card_select_vars: List[tk.BooleanVar] = []
         self._filtered_indices: List[int] = []
         self._failed_words: List[str] = []
-        self._thumb_refs: List = []
         self._stop_flag = False
         self._processing = False
         self._overnight_pass = 0
@@ -878,8 +835,6 @@ class AnkiGeneratorGUI:
         self.deck_name_var        = tk.StringVar(value=self.config.get("deck_name"))
         self.native_lang_var      = tk.StringVar(value=self.config.get("native_language"))
         self.delay_var            = tk.DoubleVar(value=self.config.get("delay_seconds"))
-        self.pixabay_key_var      = tk.StringVar(value=self.config.get("pixabay_key"))
-        self.use_pixabay_var      = tk.BooleanVar(value=self.config.get("use_pixabay"))
         self.sent_audio_var       = tk.BooleanVar(value=self.config.get("sentence_audio"))
         self.voice_word_var       = tk.StringVar(value=self.config.get("voice_word"))
         self.voice_sent_var       = tk.StringVar(value=self.config.get("voice_sentence"))
@@ -957,7 +912,7 @@ class AnkiGeneratorGUI:
                  font=("Segoe UI Semibold", 16)).pack(side=tk.LEFT)
         tk.Label(ih, text="  Generator", bg=self.SURFACE, fg=self.ACCENT,
                  font=("Segoe UI Semibold", 16)).pack(side=tk.LEFT)
-        tk.Label(ih, text="  v9  ·  3 card types  ·  edge-tts  ·  unique audio",
+        tk.Label(ih, text="  v9.1  ·  3 card types  ·  edge-tts  ·  unique audio",
                  bg=self.SURFACE, fg=self.TEXT_MUTED,
                  font=("Segoe UI", 9)).pack(side=tk.LEFT, padx=(8,0))
         self.status_lbl = tk.Label(ih, text="● Ready", bg=self.SURFACE, fg=self.SUCCESS,
@@ -1022,7 +977,6 @@ class AnkiGeneratorGUI:
 
         sec("OPTIONS")
         for text, var, key in [
-            ("Image via Pixabay",  self.use_pixabay_var, "use_pixabay"),
             ("Sentence audio",     self.sent_audio_var,  "sentence_audio"),
             ("Dark mode (restart)",tk.BooleanVar(value=self.config.get("dark_mode")), "dark_mode"),
         ]:
@@ -1203,12 +1157,6 @@ class AnkiGeneratorGUI:
                                      fg=self.TEXT_MUTED, font=("Segoe UI", 8, "bold"),
                                      padx=10, pady=3)
         self.gender_badge.pack(side=tk.LEFT, padx=(0,6))
-        self.image_badge  = tk.Label(badge_row, text="", bg="#E2E8F0",
-                                     fg=self.TEXT_MUTED, font=("Segoe UI", 8),
-                                     padx=8, pady=3)
-        self.image_badge.pack(side=tk.LEFT, padx=(0,6))
-        self.thumb_label  = tk.Label(badge_row, bg=self.SURFACE, text="")
-        self.thumb_label.pack(side=tk.LEFT, padx=(0,6))
 
         tk.Label(badge_row,
                  text="Double-click any cell to edit",
@@ -1586,19 +1534,6 @@ class AnkiGeneratorGUI:
                                   bg=self.SURFACE,fg=self.TEXT,font=("Segoe UI", 9),width=5)
         self.delay_lbl.pack(side=tk.LEFT,padx=(6,0))
 
-        sep(col_export)
-        sec(col_export,"Pixabay images")
-        pix_e = tk.Entry(col_export,textvariable=self.pixabay_key_var,font=("Segoe UI", 9),
-                         bg=self.ENTRY_BG,fg=self.TEXT,relief="flat",bd=0,show="●",
-                         insertbackground=self.TEXT)
-        pix_e.pack(fill=tk.X,pady=(0,6),ipady=6,ipadx=8)
-        pix_e.bind("<FocusOut>",
-                   lambda e: self.config.set("pixabay_key",self.pixabay_key_var.get()))
-        ttk.Button(col_export,text="Save Pixabay key",style="Soft.TButton",
-                   command=self._save_pixabay_key).pack(anchor="w",pady=(0,6))
-        tk.Label(col_export,text="pixabay.com/api/docs — free key",
-                 bg=self.SURFACE,fg=self.TEXT_MUTED,font=("Segoe UI", 8)).pack(anchor="w")
-
     def _add_key(self, ck, la, ca, va):
         raw = getattr(self, va).get().strip()
         if not raw: return
@@ -1637,11 +1572,6 @@ class AnkiGeneratorGUI:
         n = len(keys)
         cl.config(text=f"{n} key{'s' if n!=1 else ''}",
                   fg=self.SUCCESS if n > 0 else self.ERROR)
-
-    def _save_pixabay_key(self):
-        self.config.set("pixabay_key", self.pixabay_key_var.get())
-        self._set_status("Pixabay key saved ✓", self.SUCCESS)
-        self.root.after(2000, lambda: self._set_status("● Ready", self.SUCCESS))
 
     def _update_delay_lbl(self, val=None):
         v = self.delay_var.get()
@@ -1762,17 +1692,23 @@ class AnkiGeneratorGUI:
                 if not isinstance(corrections, dict):
                     raise ValueError("Verifier did not return a JSON object")
                 return corrections, None
+            except InterruptedError:
+                self._stop_heartbeat()
+                return None, "INTERRUPTED"
             except Exception as e:
                 self._stop_heartbeat()
                 last_err = str(e)
                 self._log(f"  ✗ Verifier attempt {attempt}/{attempts}: {e}", "err")
         return None, last_err
 
-    def _process_one_word(self, word, gen_client, ver_client, lang, use_pixabay, pix_key, gen):
+    def _process_one_word(self, word, gen_client, ver_client, lang, gen):
         prompt = self._build_prompt(word, lang)
         self._start_heartbeat(f"Generating '{word}'")
         try:
             raw_text = gen_client.generate(prompt)
+        except InterruptedError:
+            self._stop_heartbeat()
+            return None, "INTERRUPTED"
         except Exception as e:
             self._stop_heartbeat()
             return None, f"Generator error: {e}"
@@ -1816,23 +1752,11 @@ class AnkiGeneratorGUI:
                 entry["_unverified"] = "yes"
                 self._log(f"  ⚠ Unverified — kept generator output ({verr})", "warn")
 
-        if use_pixabay and pix_key:
-            img = PixabayClient.fetch(entry.get("target_word",word),
-                                      entry.get("english_translation",word),
-                                      entry.get("sense_hint",""),
-                                      entry.get("word_type",""), pix_key)
-            if img:
-                entry["image_url"] = img
-                self._log(f"  🖼 {img[:55]}{'…' if len(img)>55 else ''}", "ok")
-            elif entry.get("word_type") == "noun":
-                self._log("  🖼 No image found", "warn")
         return entry, None
 
     def _api_worker(self, words):
         provider     = self.provider_var.get()
         delay        = float(self.config.get("delay_seconds"))
-        use_pixabay  = self.config.get("use_pixabay")
-        pix_key      = self.config.get("pixabay_key")
         lang         = self.config.get("native_language")
         overnight    = self.config.get("overnight_mode")
         max_retries  = int(self.config.get("max_retries"))
@@ -1848,6 +1772,13 @@ class AnkiGeneratorGUI:
             ver_client = make_verifier(self.config)
         except Exception as e:
             self._log(f"⚠ Verifier unavailable: {e}", "warn")
+
+        # Wire the stop flag into both clients so _call_with_timeout can poll it.
+        stop_fn = lambda: self._stop_flag
+        if hasattr(gen_client, "stop_check"):
+            gen_client.stop_check = stop_fn
+        if ver_client is not None and hasattr(ver_client, "stop_check"):
+            ver_client.stop_check = stop_fn
 
         gen = GermanAnkiGenerator()
         results: List[Dict] = []; failed: List[str] = []
@@ -1890,9 +1821,15 @@ class AnkiGeneratorGUI:
                         time.sleep(1)
                     if self._stop_flag: break
                 entry, err = self._process_one_word(
-                    word, gen_client, ver_client, lang, use_pixabay, pix_key, gen)
-                if entry is not None: last_err = None; break
-                else: last_err = err; self._log(f"  ✗ {err}", "err")
+                    word, gen_client, ver_client, lang, gen)
+                if entry is not None:
+                    last_err = None; break
+                elif err == "INTERRUPTED":
+                    # Stop button was pressed mid-call — treat same as stop_flag.
+                    self._stop_flag = True
+                    break
+                else:
+                    last_err = err; self._log(f"  ✗ {err}", "err")
 
             if entry is not None:
                 results.append(entry)
@@ -1978,7 +1915,13 @@ class AnkiGeneratorGUI:
 
     def _stop_processing(self):
         self._stop_flag = True
-        self._log("Stop requested…", "warn")
+        self._log("⏹ Stop requested — finishing current API call…", "warn")
+        # Auto-save whatever is already done so user can generate immediately
+        # without waiting for the worker thread to fully unwind.
+        if self.parsed_data:
+            save_session(self.parsed_data)
+            self._log(f"💾 Auto-saved {len(self.parsed_data)} completed word(s). "
+                      f"You can click 'Generate files + audio' right now.", "ok")
 
     def _build_prompt(self, word, lang):
         return MASTER_PROMPT.replace("<<LANG>>", lang).replace("<<WORD>>", word)
@@ -2079,7 +2022,6 @@ class AnkiGeneratorGUI:
         entry     = self.parsed_data[idx]
         word_type = entry.get("word_type","noun")
         article   = entry.get("article","")
-        image_url = entry.get("image_url","")
 
         tc = TYPE_COLORS.get(word_type,"#E2E8F0")
         tt = TYPE_TEXT.get(word_type, self.TEXT_MUTED)
@@ -2088,19 +2030,6 @@ class AnkiGeneratorGUI:
             text=f" {article} " if article else "",
             bg=GENDER_COLORS.get(article,"#E2E8F0"),
             fg="white" if article else self.TEXT_MUTED)
-        self.image_badge.config(
-            text=" Image " if image_url else " No image ",
-            bg="#DCFCE7" if image_url else "#FEE2E2",
-            fg=self.SUCCESS if image_url else "#DC2626")
-        self.thumb_label.config(image="", text="")
-        self._thumb_refs.clear()
-        if image_url and PIL_AVAILABLE:
-            def _load():
-                tk_img = PixabayClient.fetch_thumbnail(image_url)
-                if tk_img:
-                    self._thumb_refs.append(tk_img)
-                    self.root.after(0, lambda: self.thumb_label.config(image=tk_img))
-            threading.Thread(target=_load, daemon=True).start()
 
         PRON_FIELDS = {"pronunciation_ipa","pronunciation_native","memory_tip"}
         SENT_FIELDS = {"german_sentence","english_sentence"}
@@ -2331,10 +2260,6 @@ class AnkiGeneratorGUI:
             self._log("Audio: edge-tts ✓", "ok")
         else:
             self._log("Audio: edge-tts ✗ — pip install edge-tts", "err")
-        if PIL_AVAILABLE:  self._log("Image thumbnails: Pillow ✓", "ok")
-        pix = self.config.get("pixabay_key")
-        if pix: self._log("Pixabay ✓  (nouns only)", "ok")
-        else:   self._log("Pixabay key not set — add in Settings → Export", "warn")
 
     def _offer_resume_session(self):
         data = load_session()
