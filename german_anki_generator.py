@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """
-German Anki Card Generator — v9.1
+German Anki Card Generator — v9.3
 3 card types: Recognition (DE→EN) · Production (EN→DE) · Gender Drill
 Unique audio filenames per sentence · Modern UI · 3 verified edge-tts voices
 No AnkiConnect · No Pixabay · Both prompts viewable · Full field editing
 Fix: Stop button now interrupts mid-API-call instantly (1-second polling loop).
 Fix: Auto-save completed words to session the moment Stop is pressed.
+Fix: Audio generation uses a persistent event loop thread — no more zero-byte mp3s on Windows.
+Fix: Word history now sourced entirely from backup JSONs — anki_word_history.txt removed.
+New: "Use backups" button loads already-processed words from backup JSONs, only API-calls new ones.
 """
 
 import json, os, sys, re, time, threading, asyncio, hashlib
@@ -21,6 +24,28 @@ if sys.platform == "win32":
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     except Exception:
         pass
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PERSISTENT ASYNC LOOP — run all edge-tts coroutines on one dedicated thread.
+# asyncio.run() called repeatedly from worker threads on Windows is unreliable:
+# it creates a fresh event loop each time and on WindowsSelectorEventLoopPolicy
+# the loop sometimes closes before the TLS/socket write completes, producing
+# zero-byte mp3 files with no exception raised.
+# ─────────────────────────────────────────────────────────────────────────────
+_async_loop = asyncio.new_event_loop()
+
+def _async_loop_runner():
+    asyncio.set_event_loop(_async_loop)
+    _async_loop.run_forever()
+
+_async_loop_thread = threading.Thread(target=_async_loop_runner, daemon=True, name="AsyncLoopThread")
+_async_loop_thread.start()
+
+def run_async(coro):
+    """Submit a coroutine to the persistent loop and block until it finishes.
+    Safe to call from any thread, including the Tkinter main thread."""
+    fut = asyncio.run_coroutine_threadsafe(coro, _async_loop)
+    return fut.result()  # blocks the calling thread; raises on exception
 
 try:
     from google import genai as _genai_sdk
@@ -51,9 +76,12 @@ except ImportError:
 # CONSTANTS
 # ─────────────────────────────────────────────────────────────────────────────
 
-CONFIG_FILE  = Path("anki_config.json")
-SESSION_FILE = Path("anki_session_draft.json")
-HISTORY_FILE = Path("anki_word_history.txt")
+CONFIG_FILE  = Path(__file__).resolve().parent / "anki_config.json"
+# Anchor all paths to the directory the script lives in, not the working
+# directory — so double-clicking from Explorer always finds the right folders.
+SCRIPT_DIR   = Path(__file__).resolve().parent
+OUTPUT_DIR   = SCRIPT_DIR / "anki_output"
+SESSION_FILE = SCRIPT_DIR / "anki_session_draft.json"
 
 PROVIDERS = ["Gemini", "Groq", "Custom (OpenAI-compatible)"]
 
@@ -270,50 +298,40 @@ def clear_session():
     try: SESSION_FILE.unlink(missing_ok=True)
     except Exception: pass
 
-def load_word_history():
-    """Return lowercase set of all words ever processed.
-    Robust to encoding differences (UTF-8, UTF-8-BOM, UTF-16, ANSI/cp1252)."""
-    if not HISTORY_FILE.exists(): return set()
-    try:
-        raw = HISTORY_FILE.read_bytes()
-    except Exception:
-        return set()
-    if not raw:
-        return set()
-    if raw.startswith(b"\xff\xfe") or raw.startswith(b"\xfe\xff"):
-        enc = "utf-16"
-    elif raw.startswith(b"\xef\xbb\xbf"):
-        enc = "utf-8-sig"
-    else:
-        try:
-            raw.decode("utf-8"); enc = "utf-8"
-        except UnicodeDecodeError:
-            enc = "cp1252"
-    try:
-        text = raw.decode(enc, errors="replace")
-    except Exception:
-        return set()
-    text = text.replace("\x00", "")
-    return {line.strip().lower() for line in text.splitlines() if line.strip()}
+def load_all_backup_words():
+    """Scan all anki_output/backups/*.json files and return a dict
+    mapping lowercase target_word → entry dict, using the most recently
+    modified backup file when the same word appears in multiple files.
 
-def append_word_history(words):
-    """Store lowercase. Rewrites the whole file in UTF-8 to normalize encoding."""
-    try:
-        existing = load_word_history()
-        for w in words:
-            wl = str(w).strip().lower()
-            if wl:
-                existing.add(wl)
-        if not existing:
-            return
-        tmp = HISTORY_FILE.with_suffix(".tmp")
-        tmp.write_text("\n".join(sorted(existing)) + "\n", encoding="utf-8")
-        tmp.replace(HISTORY_FILE)
-    except Exception: pass
+    Returns: {lowercase_word: entry_dict}
+    """
+    bd = OUTPUT_DIR / "backups"
+    if not bd.exists():
+        return {}
+
+    # Collect all files sorted oldest→newest so later (newer) files
+    # overwrite earlier ones for the same word.
+    files = sorted(bd.glob("*.json"), key=lambda p: p.stat().st_mtime)
+
+    result = {}
+    for fp in files:
+        try:
+            raw = json.loads(fp.read_text(encoding="utf-8"))
+            # Backup files are saved as plain list of entry dicts.
+            entries = raw if isinstance(raw, list) else raw.get("data", [])
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                word = str(entry.get("target_word", "")).strip()
+                if word:
+                    result[word.lower()] = entry
+        except Exception:
+            pass
+    return result
 
 def load_stats():
     stats = {"total":0,"noun":0,"verb":0,"adjective":0,"phrase":0,"sessions":0}
-    bd = Path("anki_output/backups")
+    bd = OUTPUT_DIR / "backups"
     if not bd.exists(): return stats
     for fp in bd.glob("*.json"):
         stats["sessions"] += 1
@@ -542,8 +560,8 @@ def make_verifier(config):
 # ─────────────────────────────────────────────────────────────────────────────
 
 class GermanAnkiGenerator:
-    def __init__(self, output_dir="anki_output"):
-        self.output_dir = Path(output_dir)
+    def __init__(self, output_dir=None):
+        self.output_dir = Path(output_dir) if output_dir else OUTPUT_DIR
         self.audio_dir  = self.output_dir / "media"
         self.timestamp  = datetime.now().strftime("%Y%m%d_%H%M%S")
 
@@ -583,25 +601,35 @@ class GermanAnkiGenerator:
         if not EDGE_TTS_AVAILABLE or not text.strip(): return None
         fp = self.audio_dir / f"{filename}.mp3"
         if fp.exists() and fp.stat().st_size > 0: return fp
+        # Remove any leftover zero-byte file so edge-tts writes fresh.
+        if fp.exists():
+            try: fp.unlink()
+            except Exception: pass
         try:
             async def _run():
                 comm = edge_tts.Communicate(text, voice=voice, rate=speed)
                 await comm.save(str(fp))
-            asyncio.run(_run())
+            run_async(_run())
             return fp if fp.exists() and fp.stat().st_size > 0 else None
-        except Exception: return None
+        except Exception:
+            return None
 
     def play_audio(self, text, voice, speed="+0%"):
         if not EDGE_TTS_AVAILABLE or not text.strip(): return
-        tmp = Path("anki_output/media"); tmp.mkdir(parents=True, exist_ok=True)
+        tmp = OUTPUT_DIR / "media"; tmp.mkdir(parents=True, exist_ok=True)
         fp = tmp / f"_preview_{self.sanitize_filename(text[:20])}.mp3"
         def _worker():
             try:
-                async def _gen():
-                    comm = edge_tts.Communicate(text, voice=voice, rate=speed)
-                    await comm.save(str(fp))
-                asyncio.run(_gen())
-                if fp.exists():
+                # Remove stale zero-byte file before regenerating.
+                if fp.exists() and fp.stat().st_size == 0:
+                    try: fp.unlink()
+                    except Exception: pass
+                if not (fp.exists() and fp.stat().st_size > 0):
+                    async def _gen():
+                        comm = edge_tts.Communicate(text, voice=voice, rate=speed)
+                        await comm.save(str(fp))
+                    run_async(_gen())
+                if fp.exists() and fp.stat().st_size > 0:
                     if sys.platform == "win32": os.startfile(str(fp))
                     elif sys.platform == "darwin": os.system(f'afplay "{fp}"')
                     else: os.system(f'mpg123 "{fp}" 2>/dev/null || aplay "{fp}" 2>/dev/null')
@@ -912,7 +940,7 @@ class AnkiGeneratorGUI:
                  font=("Segoe UI Semibold", 16)).pack(side=tk.LEFT)
         tk.Label(ih, text="  Generator", bg=self.SURFACE, fg=self.ACCENT,
                  font=("Segoe UI Semibold", 16)).pack(side=tk.LEFT)
-        tk.Label(ih, text="  v9.1  ·  3 card types  ·  edge-tts  ·  unique audio",
+        tk.Label(ih, text="  v9.3  ·  3 card types  ·  edge-tts  ·  unique audio",
                  bg=self.SURFACE, fg=self.TEXT_MUTED,
                  font=("Segoe UI", 9)).pack(side=tk.LEFT, padx=(8,0))
         self.status_lbl = tk.Label(ih, text="● Ready", bg=self.SURFACE, fg=self.SUCCESS,
@@ -1070,7 +1098,7 @@ class AnkiGeneratorGUI:
         ttk.Button(btn_col, text="Clear", style="Ghost.TButton",
                    command=lambda: self.word_box.delete(1.0, tk.END)).pack(fill=tk.X, pady=2)
         ttk.Button(btn_col, text="History", style="Ghost.TButton",
-                   command=self._show_history).pack(fill=tk.X, pady=2)
+                   command=self._show_backup_history).pack(fill=tk.X, pady=2)
 
         proc_row = tk.Frame(parent, bg=self.SURFACE)
         proc_row.pack(fill=tk.X, pady=(2,10))
@@ -1103,6 +1131,10 @@ class AnkiGeneratorGUI:
                         ("info",self.LOG_INFO),("warn",self.WARN)]:
             self.log_box.tag_configure(tag, foreground=fg)
         self._log("Ready. Enter words above and click Process words.", "info")
+        self._log(f"📁 Output folder: {OUTPUT_DIR}", "info")
+        backup_count = len(list((OUTPUT_DIR / "backups").glob("*.json"))) \
+                       if (OUTPUT_DIR / "backups").exists() else 0
+        self._log(f"📦 Backup JSONs found: {backup_count}", "info")
 
     def _build_preview_tab(self, parent):
         top = tk.Frame(parent, bg=self.SURFACE)
@@ -1601,6 +1633,57 @@ class AnkiGeneratorGUI:
     # PROCESSING
     # ─────────────────────────────────────────────────────────────────────────
 
+    def _ask_duplicate_action(self, msg):
+        """Show a custom 4-button dialog: Yes / No / Use backups / Cancel.
+        Returns: 'yes' | 'no' | 'backups' | 'cancel'
+        """
+        result = [None]
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Duplicates found")
+        dlg.resizable(False, False)
+        dlg.configure(bg=self.SURFACE)
+        dlg.minsize(420, 0)
+        dlg.grab_set()
+
+        # Message label
+        tk.Label(dlg, text=msg, bg=self.SURFACE, fg=self.TEXT,
+                 font=("Segoe UI", 10), justify=tk.LEFT,
+                 wraplength=380, anchor="w",
+                 padx=24, pady=18).pack(fill=tk.X)
+
+        # Separator
+        tk.Frame(dlg, bg=self.BORDER if hasattr(self, "BORDER") else "#cccccc",
+                 height=1).pack(fill=tk.X, padx=24)
+
+        # Button frame
+        btn_frame = tk.Frame(dlg, bg=self.SURFACE)
+        btn_frame.pack(fill=tk.X, padx=24, pady=16)
+
+        def choose(val):
+            result[0] = val
+            dlg.destroy()
+
+        buttons = [
+            ("✔  Yes — regenerate all words via API", "yes",     "Primary.TButton"),
+            ("⏭  No — skip known, process new only",  "no",      "Soft.TButton"),
+            ("📂  Use backups — load from JSON files", "backups", "Soft.TButton"),
+            ("✕  Cancel",                              "cancel",  "Ghost.TButton"),
+        ]
+        for text, val, style in buttons:
+            ttk.Button(btn_frame, text=text, style=style,
+                       command=lambda v=val: choose(v)).pack(
+                fill=tk.X, pady=4, ipady=4)
+
+        # Center over parent window
+        self.root.update_idletasks()
+        dlg.update_idletasks()
+        px = self.root.winfo_x() + (self.root.winfo_width()  - dlg.winfo_width())  // 2
+        py = self.root.winfo_y() + (self.root.winfo_height() - dlg.winfo_height()) // 2
+        dlg.geometry(f"+{max(0,px)}+{max(0,py)}")
+        dlg.protocol("WM_DELETE_WINDOW", lambda: choose("cancel"))
+        self.root.wait_window(dlg)
+        return result[0] or "cancel"
+
     def _start_api_processing(self):
         if self._processing: return
         raw = self.word_box.get(1.0, tk.END).strip()
@@ -1615,48 +1698,97 @@ class AnkiGeneratorGUI:
         if not words:
             messagebox.showwarning("No words", "Could not parse any words."); return
 
-        seen = set()
-        deduped = []
+        # Deduplicate within the input list itself
+        seen = set(); deduped = []
         for w in words:
             wl = w.strip().lower()
             if wl and wl not in seen:
-                seen.add(wl)
-                deduped.append(w.strip())
+                seen.add(wl); deduped.append(w.strip())
         if len(deduped) < len(words):
             self._log(f"ℹ Removed {len(words) - len(deduped)} duplicate(s) from the input list.", "info")
         words = deduped
 
-        history = load_word_history()
+        # Load ALL words known across every backup JSON (newest file wins per word)
+        backup_words = load_all_backup_words()   # {lower_word: entry_dict}
+
+        # Words already in this session's preview
         in_session = {str(e.get("target_word","")).strip().lower()
                       for e in self.parsed_data if e.get("target_word")}
-        dupes_history = [w for w in words if w.strip().lower() in history]
-        dupes_session = [w for w in words if w.strip().lower() in in_session]
 
-        if dupes_history or dupes_session:
+        # Classify input words
+        in_backup  = [w for w in words if w.strip().lower() in backup_words]
+        in_sess    = [w for w in words if w.strip().lower() in in_session
+                      and w.strip().lower() not in backup_words]
+        known_all  = [w for w in words if w.strip().lower() in backup_words
+                      or w.strip().lower() in in_session]
+        new_words  = [w for w in words if w.strip().lower() not in backup_words
+                      and w.strip().lower() not in in_session]
+
+        if known_all:
             lines = []
-            if dupes_session:
-                preview = ", ".join(dupes_session[:8]) + ("…" if len(dupes_session) > 8 else "")
-                lines.append(f"In this session ({len(dupes_session)}): {preview}")
-            if dupes_history:
-                preview = ", ".join(dupes_history[:8]) + ("…" if len(dupes_history) > 8 else "")
-                lines.append(f"Previously processed ({len(dupes_history)}): {preview}")
-            msg = ("Duplicate words found:\n\n" + "\n\n".join(lines) +
-                   "\n\nYes = process all (re-generate)\nNo = skip duplicates\nCancel = abort")
-            choice = messagebox.askyesnocancel("Duplicates found", msg)
-            if choice is None:
+            if in_backup:
+                pv = ", ".join(in_backup[:8]) + ("…" if len(in_backup) > 8 else "")
+                lines.append(f"In backup JSONs ({len(in_backup)}): {pv}")
+            if in_sess:
+                pv = ", ".join(in_sess[:8]) + ("…" if len(in_sess) > 8 else "")
+                lines.append(f"In current session ({len(in_sess)}): {pv}")
+            lines.append(f"\nNew words to process: {len(new_words)}")
+            msg = ("Some words already exist:\n\n" + "\n\n".join(lines))
+
+            choice = self._ask_duplicate_action(msg)
+
+            if choice == "cancel":
                 return
-            if choice is False:
-                skip = {w.strip().lower() for w in dupes_history + dupes_session}
-                words = [w for w in words if w.strip().lower() not in skip]
-                self._log(f"ℹ Skipped {len(skip)} known word(s). "
+
+            elif choice == "yes":
+                # Regenerate everything via API — no changes to words list
+                self._log(f"⚠ Regenerating all {len(words)} word(s) via API.", "warn")
+
+            elif choice == "no":
+                # Only send truly new words to the API; skip all known ones
+                words = new_words
+                self._log(f"ℹ Skipped {len(known_all)} known word(s). "
                           f"Processing {len(words)} new word(s).", "info")
                 if not words:
                     messagebox.showinfo("Nothing to do",
-                        "All entered words have already been processed.")
+                        "All entered words are already in your backup JSONs.")
                     return
-            else:
-                self._log(f"⚠ Proceeding with {len(dupes_history)+len(dupes_session)} "
-                          f"duplicate(s) — they will be re-generated.", "warn")
+
+            elif choice == "backups":
+                # Pull backup data for known words; only API-call new ones.
+                # Inject backup entries directly into parsed_data right now.
+                loaded = []
+                for w in words:
+                    wl = w.strip().lower()
+                    if wl in backup_words:
+                        loaded.append(backup_words[wl])
+                    elif wl in in_session:
+                        # Already in preview — keep as-is, don't duplicate
+                        pass
+
+                if loaded:
+                    # Merge: avoid adding words already in current session
+                    current_lower = {str(e.get("target_word","")).strip().lower()
+                                     for e in self.parsed_data}
+                    truly_new_loaded = [e for e in loaded
+                                        if str(e.get("target_word","")).strip().lower()
+                                        not in current_lower]
+                    if truly_new_loaded:
+                        self.parsed_data = list(self.parsed_data) + truly_new_loaded
+                        self._card_select_vars += [tk.BooleanVar(value=True)
+                                                   for _ in truly_new_loaded]
+                        self._refresh_preview()
+                        self._log(f"📂 Loaded {len(truly_new_loaded)} word(s) from backup JSONs.", "ok")
+
+                # Only send the genuinely new words to the API
+                words = new_words
+                if not words:
+                    save_session(self.parsed_data)
+                    self._set_status(f"✓ {len(self.parsed_data)} words ready", self.SUCCESS)
+                    self._log("✓ All words loaded from backups — nothing new to generate.", "ok")
+                    self.nb.select(1)
+                    return
+                self._log(f"⏳ Generating {len(words)} new word(s) via API…", "info")
 
         self.queue_lbl.config(text=f"{len(words)} word(s): {', '.join(words[:5])}{'…' if len(words)>5 else ''}")
         self._stop_flag = False; self._processing = True; self._overnight_pass = 0
@@ -1864,7 +1996,6 @@ class AnkiGeneratorGUI:
             self.parsed_data = list(self.parsed_data) + results
             self._card_select_vars += [tk.BooleanVar(value=True) for _ in results]
             save_session(self.parsed_data)
-            append_word_history([e.get("target_word","") for e in results])
             self._refresh_preview()
             if hasattr(self, "session_stats_lbl"): self._refresh_stats()
 
@@ -2202,17 +2333,39 @@ class AnkiGeneratorGUI:
                 self._log(f"  ✗ {provider}: {e}", "err")
         threading.Thread(target=run, daemon=True).start()
 
-    def _show_history(self):
-        h = load_word_history()
-        if not h:
-            messagebox.showinfo("History","No words processed yet."); return
-        top = tk.Toplevel(self.root); top.title("Word History")
-        top.geometry("440x460"); top.configure(bg=self.SURFACE)
+    def _show_backup_history(self):
+        """Show all words found across backup JSONs, grouped by word type."""
+        backup_words = load_all_backup_words()
+        if not backup_words:
+            messagebox.showinfo("History",
+                "No backup JSONs found yet.\n"
+                "Words appear here after you click 'Generate files + audio'."); return
+
+        # Group by word_type
+        groups = {"noun": [], "verb": [], "adjective": [], "phrase": [], "other": []}
+        for lower_word, entry in sorted(backup_words.items()):
+            wt = entry.get("word_type", "").strip().lower()
+            display = str(entry.get("target_word", lower_word)).strip()
+            groups.get(wt, groups["other"]).append(display)
+
+        top = tk.Toplevel(self.root)
+        top.title(f"Word History — {len(backup_words)} words across all backups")
+        top.geometry("480x520"); top.configure(bg=self.SURFACE)
+
         st = scrolledtext.ScrolledText(top, font=("Consolas", 9),
                                        bg=self.SURFACE, fg=self.TEXT,
                                        relief="flat", bd=0, padx=14, pady=14)
         st.pack(fill=tk.BOTH, expand=True)
-        st.insert(tk.END, f"{len(h)} words processed:\n\n" + "\n".join(sorted(h)))
+
+        lines = [f"{len(backup_words)} words across all backup JSONs:\n"]
+        for wt, label in [("noun","Nouns"), ("verb","Verbs"),
+                          ("adjective","Adjectives"), ("phrase","Phrases"),
+                          ("other","Other")]:
+            if groups[wt]:
+                lines.append(f"\n── {label} ({len(groups[wt])}) ──")
+                lines.extend(f"  {w}" for w in sorted(groups[wt]))
+
+        st.insert(tk.END, "\n".join(lines))
         st.config(state="disabled")
 
     def _paste_words(self):
@@ -2225,7 +2378,7 @@ class AnkiGeneratorGUI:
         except Exception: pass
 
     def _open_folder(self):
-        folder = Path("anki_output"); folder.mkdir(exist_ok=True)
+        folder = OUTPUT_DIR; folder.mkdir(exist_ok=True)
         if sys.platform=="win32": os.startfile(str(folder))
         elif sys.platform=="darwin": os.system(f'open "{folder}"')
         else: os.system(f'xdg-open "{folder}"')
